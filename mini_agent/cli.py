@@ -466,6 +466,11 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path):
         tools.append(SessionNoteTool(memory_file=str(workspace_dir / ".agent_memory.json")))
         print(f"{Colors.GREEN}✅ Loaded session note tool{Colors.RESET}")
 
+    # Weather tool - no workspace dependency but loaded here for convenience
+    from mini_agent.tools.weather_tool import WeatherTool
+    tools.append(WeatherTool())
+    print(f"{Colors.GREEN}✅ Loaded weather tool{Colors.RESET}")
+
 
 async def _quiet_cleanup():
     """Clean up MCP connections, suppressing noisy asyncgen teardown tracebacks."""
