@@ -63,6 +63,11 @@ disable = [
     "arguments-differ",  # Allow subclasses to have different parameter signatures
 ]
 
+# PyPI mirror: Tsinghua TUNA — pinned here so uv.lock URLs stay consistent across all contributors
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
 [dependency-groups]
 dev = [
     "pytest-asyncio>=1.2.0",
