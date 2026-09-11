@@ -12,7 +12,7 @@ from .llm import LLMClient
 from .logger import AgentLogger
 from .schema import Message
 from .tools.base import Tool, ToolResult
-from .utils import calculate_display_width
+from .utils import calculate_display_width, display_assistant_text
 
 
 # ANSI color codes
@@ -411,7 +411,7 @@ Requirements:
             # Print assistant response
             if response.content:
                 print(f"\n{Colors.BOLD}{Colors.BRIGHT_BLUE}🤖 Assistant:{Colors.RESET}")
-                print(f"{response.content}")
+                display_assistant_text(response.content)
 
             # Check if task is complete (no tool calls)
             if not response.tool_calls:
