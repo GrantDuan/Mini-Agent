@@ -63,7 +63,7 @@ This is why evals exist. They catch these silent failures.
 
 ## The Code
 
-Look at `agent/evals.py`:
+Look at `evals/evals.py`:
 
 ```python
 from dataclasses import dataclass, field
@@ -149,11 +149,10 @@ STRUCTURED_OUTPUT_GOLDEN = [
     {
         "input": "Explain quantum computing in one sentence",
         "schema": """{
-  "topic": "the topic name as a string",
-  "difficulty": "beginner" or "intermediate" or "advanced"
-}
-
-Example: {"topic": "machine learning", "difficulty": "intermediate"}""",
+            "topic": "the topic name as a string",
+            "difficulty": "beginner" or "intermediate" or "advanced"
+            }
+            Example: {"topic": "machine learning", "difficulty": "intermediate"}""",
         "must_have_fields": ["topic", "difficulty"]
     },
 ]

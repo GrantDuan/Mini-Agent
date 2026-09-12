@@ -35,7 +35,7 @@ from mini_agent.tools.base import Tool
 from mini_agent.tools.bash_tool import BashKillTool, BashOutputTool, BashTool
 from mini_agent.tools.file_tools import EditTool, ReadTool, WriteTool
 from mini_agent.tools.mcp_loader import cleanup_mcp_connections, load_mcp_tools_async, set_mcp_timeout_config
-from mini_agent.tools.note_tool import SessionNoteTool
+from mini_agent.tools.note_tool import RecallNoteTool, SessionNoteTool
 from mini_agent.tools.skill_tool import create_skill_tools
 from mini_agent.utils import calculate_display_width
 
@@ -464,7 +464,13 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path):
     # Session note tool - needs workspace to store memory file
     if config.tools.enable_note:
         tools.append(SessionNoteTool(memory_file=str(workspace_dir / ".agent_memory.json")))
-        print(f"{Colors.GREEN}✅ Loaded session note tool{Colors.RESET}")
+        tools.append(RecallNoteTool(memory_file=str(workspace_dir / ".agent_memory.json")))
+        print(f"{Colors.GREEN}✅ Loaded session note tools (record + recall){Colors.RESET}")
+
+    # Calculator tool - deterministic arithmetic (don't trust LLM math)
+    from mini_agent.tools.calculator_tool import CalculatorTool
+    tools.append(CalculatorTool())
+    print(f"{Colors.GREEN}✅ Loaded calculator tool{Colors.RESET}")
 
     # Weather tool - no workspace dependency but loaded here for convenience
     from mini_agent.tools.weather_tool import WeatherTool
