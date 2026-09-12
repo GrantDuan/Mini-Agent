@@ -36,6 +36,7 @@ import json
 import re
 import shutil
 import sys
+import time
 from pathlib import Path
 
 # Allow running directly: python evals/run.py
@@ -167,10 +168,14 @@ def extract_json(text: str) -> dict | None:
     return None
 
 
-async def run_task(task: str, max_steps: int = 8) -> tuple[str, Agent]:
-    """Fresh agent per case - golden cases must not leak into each other."""
+async def run_task(task: str, max_steps: int = 8) -> tuple[str, Agent, float]:
+    """Fresh agent per case - golden cases must not leak into each other.
+
+    Returns (reply, agent, elapsed_seconds).
+    """
     agent = build_agent(max_steps=max_steps)
     agent.add_user_message(task)
+    started = time.perf_counter()
     if QUIET:
         # The agent prints a banner per step. A full golden run would
         # otherwise bury the report under thousands of lines.
@@ -178,7 +183,22 @@ async def run_task(task: str, max_steps: int = 8) -> tuple[str, Agent]:
             reply = await agent.run()
     else:
         reply = await agent.run()
-    return reply, agent
+    return reply, agent, time.perf_counter() - started
+
+
+def record_result(
+    suite: EvalSuiteResult, result: EvalResult, agent: Agent | None, elapsed: float
+):
+    """Attach efficiency metrics to a result, then add it to the suite.
+
+    steps    = LLM turns (one assistant message per step)
+    tokens   = local estimate of the FINAL context size
+    """
+    if agent is not None:
+        result.steps = sum(1 for m in agent.messages if m.role == "assistant")
+        result.tokens = agent._estimate_tokens()
+    result.duration_s = elapsed
+    suite.add_result(result)
 
 
 # ============================================================
@@ -195,28 +215,30 @@ async def eval_structured_output(cases: list[dict]) -> EvalSuiteResult:
             "(no markdown, no explanation):\n"
             f"{case['schema']}"
         )
-        reply, _ = await run_task(task, max_steps=3)
+        reply, agent, elapsed = await run_task(task, max_steps=3)
         result = extract_json(reply)
 
         if result is None:
-            suite.add_result(EvalResult(
+            record_result(suite, EvalResult(
                 passed=False, input=case["input"],
                 expected="Valid JSON", actual=reply[:200],
                 error="Failed to parse JSON",
-            ))
+            ), agent, elapsed)
             continue
 
         missing = [f for f in case.get("must_have_fields", []) if f not in result]
         if missing:
-            suite.add_result(EvalResult(
+            record_result(suite, EvalResult(
                 passed=False, input=case["input"],
                 expected=f"Fields: {case.get('must_have_fields', [])}",
                 actual=f"Missing: {missing}",
                 error="Schema contract violated",
-            ))
+            ), agent, elapsed)
             continue
 
-        suite.add_result(EvalResult(passed=True, input=case["input"], actual=result))
+        record_result(suite, EvalResult(
+            passed=True, input=case["input"], actual=result,
+        ), agent, elapsed)
     return suite
 
 
@@ -224,27 +246,27 @@ async def eval_tool_calls(cases: list[dict]) -> EvalSuiteResult:
     """Run the full agent and check WHICH tools it called with WHAT arguments."""
     suite = EvalSuiteResult(name="Tool Calls")
     for case in cases:
-        _, agent = await run_task(case["input"])
+        _, agent, elapsed = await run_task(case["input"])
         calls = collect_tool_calls(agent)
 
         if not calls:
-            suite.add_result(EvalResult(
+            record_result(suite, EvalResult(
                 passed=False, input=case["input"],
                 expected=case["expected_tool"], actual=None,
                 error="Agent made no tool calls",
-            ))
+            ), agent, elapsed)
             continue
 
         # Does any call match the expected tool? (agent may retry/break down
         # the problem, so scan all calls, not just the first)
         matching = [c for c in calls if c["tool"] == case["expected_tool"]]
         if not matching:
-            suite.add_result(EvalResult(
+            record_result(suite, EvalResult(
                 passed=False, input=case["input"],
                 expected=case["expected_tool"],
                 actual=[c["tool"] for c in calls],
                 error="Expected tool never called",
-            ))
+            ), agent, elapsed)
             continue
 
         # Check required arguments on one matching call
@@ -255,18 +277,18 @@ async def eval_tool_calls(cases: list[dict]) -> EvalSuiteResult:
             None,
         )
         if ok_call is None:
-            suite.add_result(EvalResult(
+            record_result(suite, EvalResult(
                 passed=False, input=case["input"],
                 expected=expected_args,
                 actual=[c["arguments"] for c in matching],
                 error="Tool called but with wrong arguments",
-            ))
+            ), agent, elapsed)
             continue
 
-        suite.add_result(EvalResult(
+        record_result(suite, EvalResult(
             passed=True, input=case["input"],
             expected=case["expected_tool"], actual=ok_call,
-        ))
+        ), agent, elapsed)
     return suite
 
 
@@ -281,26 +303,26 @@ async def eval_decisions(cases: list[dict]) -> EvalSuiteResult:
             f"This request must be routed to exactly one of: {choice_list}.\n"
             "Reply with ONLY the name of the best matching action, nothing else."
         )
-        reply, _ = await run_task(task, max_steps=2)
+        reply, agent, elapsed = await run_task(task, max_steps=2)
 
         matched = next((c for c in choices if c in reply), None)
         if matched is None:
-            suite.add_result(EvalResult(
+            record_result(suite, EvalResult(
                 passed=False, input=case["input"],
                 expected=case["expected"], actual=reply[:200],
                 error="Reply matched no valid choice",
-            ))
+            ), agent, elapsed)
         elif matched != case["expected"]:
-            suite.add_result(EvalResult(
+            record_result(suite, EvalResult(
                 passed=False, input=case["input"],
                 expected=case["expected"], actual=matched,
                 error="Wrong routing decision",
-            ))
+            ), agent, elapsed)
         else:
-            suite.add_result(EvalResult(
+            record_result(suite, EvalResult(
                 passed=True, input=case["input"],
                 expected=case["expected"], actual=matched,
-            ))
+            ), agent, elapsed)
     return suite
 
 
@@ -316,39 +338,41 @@ async def eval_memory_cycle(cases: list[dict]) -> EvalSuiteResult:
         if MEMORY_FILE.exists():
             MEMORY_FILE.unlink()
 
-        _, store_agent = await run_task(
+        _, store_agent, store_elapsed = await run_task(
             f"{case['store_input']}\n\n"
             "Record this information with the record_note tool before replying.",
         )
         recorded = any(c["tool"] == "record_note" for c in collect_tool_calls(store_agent))
 
-        reply, query_agent = await run_task(
+        reply, query_agent, query_elapsed = await run_task(
             f"{case['query_input']}\n\n"
             "If you need information about the user, use the recall_notes tool.",
         )
 
+        elapsed = store_elapsed + query_elapsed
+
         if not recorded:
-            suite.add_result(EvalResult(
+            record_result(suite, EvalResult(
                 passed=False, input=f"{case['store_input']} → {case['query_input']}",
                 expected="record_note called", actual=None,
                 error="Agent never stored the fact",
-            ))
+            ), query_agent, elapsed)
             continue
 
         expected_sub = case.get("expected_in_response", "")
         if expected_sub.lower() in reply.lower():
-            suite.add_result(EvalResult(
+            record_result(suite, EvalResult(
                 passed=True,
                 input=f"{case['store_input']} → {case['query_input']}",
                 expected=expected_sub, actual=reply[:200],
-            ))
+            ), query_agent, elapsed)
         else:
-            suite.add_result(EvalResult(
+            record_result(suite, EvalResult(
                 passed=False,
                 input=f"{case['store_input']} → {case['query_input']}",
                 expected=expected_sub, actual=reply[:200],
                 error="Expected content not in reply",
-            ))
+            ), query_agent, elapsed)
     # Clean up after the suite
     if MEMORY_FILE.exists():
         MEMORY_FILE.unlink()
@@ -454,27 +478,27 @@ async def eval_real_agent(cases: list[dict]) -> EvalSuiteResult:
         setup_case(case)
         max_steps = case["expect"].get("max_steps", 10)
         try:
-            reply, agent = await run_task(case["task"], max_steps=max_steps)
+            reply, agent, elapsed = await run_task(case["task"], max_steps=max_steps)
         except Exception as e:  # a crash IS a failing eval case
-            suite.add_result(EvalResult(
+            record_result(suite, EvalResult(
                 passed=False, input=case["name"],
                 expected="task completes", actual=None,
                 error=f"{type(e).__name__}: {e}",
-            ))
+            ), None, 0.0)
             continue
 
         failures = check_case(case, reply, agent)
         if failures:
-            suite.add_result(EvalResult(
+            record_result(suite, EvalResult(
                 passed=False, input=case["name"],
                 expected="; ".join(failures),
                 actual=(reply or "")[:250],
                 error="assertions failed",
-            ))
+            ), agent, elapsed)
         else:
-            suite.add_result(EvalResult(
+            record_result(suite, EvalResult(
                 passed=True, input=case["name"], actual=(reply or "")[:250],
-            ))
+            ), agent, elapsed)
     reset_workspace()
     return suite
 

@@ -25,6 +25,15 @@ class EvalResult:
     expected: Any = None
     actual: Any = None
     error: str | None = None
+    # Efficiency metrics (filled by run.py after the agent finishes):
+    # - steps: LLM turns taken (one assistant message per step)
+    # - tokens: local token estimate of the FINAL context size
+    #   (api_total_tokens only reflects the last call, so the end-of-run
+    #   estimate is the more comparable baseline across runs)
+    # - duration_s: wall-clock time of the case
+    steps: int | None = None
+    tokens: int | None = None
+    duration_s: float | None = None
 
 
 @dataclass
@@ -51,6 +60,19 @@ class EvalSuiteResult:
         else:
             self.failed += 1
 
+    def efficiency_summary(self) -> str:
+        """Averages over cases that have metrics, or '' if none do."""
+        with_metrics = [r for r in self.results if r.steps is not None]
+        if not with_metrics:
+            return ""
+        avg = lambda attr: sum(getattr(r, attr) or 0 for r in with_metrics) / len(with_metrics)
+        dur = avg("duration_s")
+        dur_part = f", {dur:.1f}s/case" if dur else ""
+        return (
+            f"    avg steps: {avg('steps'):.1f}, "
+            f"avg final context: {avg('tokens'):.0f} tokens{dur_part}"
+        )
+
     def summary(self) -> str:
         """Generate a human-readable summary."""
         status = "✓ PASSED" if self.failed == 0 else "✗ FAILED"
@@ -73,11 +95,20 @@ def print_eval_report(results: list[EvalSuiteResult]):
 
     for suite in results:
         print(f"\n{suite.summary()}")
+        efficiency = suite.efficiency_summary()
+        if efficiency:
+            print(efficiency)
 
         # Show failures
         for result in suite.results:
             if not result.passed:
-                print(f"  ✗ Input: {result.input[:50]}...")
+                metrics = []
+                if result.steps is not None:
+                    metrics.append(f"steps={result.steps}")
+                if result.tokens is not None:
+                    metrics.append(f"tokens={result.tokens}")
+                metric_part = f" ({', '.join(metrics)})" if metrics else ""
+                print(f"  ✗ Input: {result.input[:50]}...{metric_part}")
                 if result.expected:
                     print(f"    Expected: {result.expected}")
                 if result.actual:
