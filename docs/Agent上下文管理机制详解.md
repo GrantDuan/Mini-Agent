@@ -249,23 +249,56 @@ should_summarize = (
 
 | 方式 | 来源 | 计算时机 | 优点 | 缺点 |
 |------|------|---------|------|------|
-| **本地估算** | 按字符数/4 粗略计算 | 每次调用前 | 实时、无延迟 | 不够精确 |
+| **本地估算** | tiktoken `cl100k_base` 逐条实际编码 | 每次调用前 | 实时、无延迟；接近真实分词 | 按消息 +4 估算固定开销，与真实模板有偏差 |
 | **API 报告** | LLM 返回的 `usage.total_tokens` | 调用后 | 绝对精确 | 延迟一轮 |
 
 ### Token 估算实现
 
+本地估算**不是**简单的"字符数/4"，而是真的调 tiktoken 编码一遍：
+
 ```python
+# mini_agent/agent.py:123-158
 def _estimate_tokens(self) -> int:
-    """粗略估算消息列表的 token 数量"""
-    total = 0
+    """Accurately calculate token count for message history using tiktoken"""
+    try:
+        encoding = tiktoken.get_encoding("cl100k_base")
+    except Exception:
+        # tiktoken 不可用时才降级
+        return self._estimate_tokens_fallback()
+
+    total_tokens = 0
     for msg in self.messages:
-        # 简单规则：1 token ≈ 4 个字符
-        if msg.content:
-            total += len(str(msg.content)) // 4
+        if isinstance(msg.content, str):
+            total_tokens += len(encoding.encode(msg.content))
+        elif isinstance(msg.content, list):          # 多模态 / block 形式
+            for block in msg.content:
+                if isinstance(block, dict):
+                    total_tokens += len(encoding.encode(str(block)))
+
+        if msg.thinking:                              # 思考内容也计入
+            total_tokens += len(encoding.encode(msg.thinking))
         if msg.tool_calls:
-            total += len(str(msg.tool_calls)) // 4
-    return total
+            total_tokens += len(encoding.encode(str(msg.tool_calls)))
+
+        total_tokens += 4                             # 每条消息的元数据开销
+
+    return total_tokens
 ```
+
+降级路径才是"字符数估算"，且系数是 **2.5** 不是 4：
+
+```python
+# mini_agent/agent.py:160-178
+def _estimate_tokens_fallback(self) -> int:
+    """Fallback token estimation method (when tiktoken is unavailable)"""
+    total_chars = 0
+    # ... 累加 content / thinking / tool_calls 的字符数
+    # Rough estimation: average 2.5 characters = 1 token
+    return int(total_chars / 2.5)
+```
+
+> ⚠️ 注意 `encoding.encode()` 是在**整个消息历史**上逐条跑的。历史越长，
+> 这一步越贵——它本身也是上下文管理的一个隐性成本。
 
 ### API Token 更新
 
@@ -403,7 +436,7 @@ Agent 使用 LLM 来总结之前的 LLM 执行历史！🤯
 ### 总结生成流程
 
 ```python
-# mini_agent/agent.py:262-298
+# mini_agent/agent.py:262-319
 async def _create_summary(self, messages: list[Message], round_num: int) -> str:
     """为一轮执行创建总结"""
 
@@ -412,16 +445,18 @@ async def _create_summary(self, messages: list[Message], round_num: int) -> str:
 
     for msg in messages:
         if msg.role == "assistant":
-            summary_content += f"Assistant: {msg.content}\n"
+            content_text = msg.content if isinstance(msg.content, str) else str(msg.content)
+            summary_content += f"Assistant: {content_text}\n"
             if msg.tool_calls:
                 tool_names = [tc.function.name for tc in msg.tool_calls]
                 summary_content += f"  → Called tools: {', '.join(tool_names)}\n"
 
         elif msg.role == "tool":
-            result_preview = msg.content[:200] + "..."
-            summary_content += f"  ← Tool returned: {result_preview}\n"
+            # ⚠️ 这里没有截断！工具返回的完整内容原样进 prompt
+            result_preview = msg.content if isinstance(msg.content, str) else str(msg.content)
+            summary_content += f"  ← Tool returned: {result_preview}...\n"
 
-    # Step 2: 构建总结提示词
+    # Step 2: 构建总结提示词（注意：还额外带了一条 system 消息）
     summary_prompt = f"""Please provide a concise summary of the following Agent execution process:
 
 {summary_content}
@@ -430,14 +465,21 @@ Requirements:
 1. Focus on what tasks were completed and which tools were called
 2. Keep key execution results and important findings
 3. Be concise and clear, within 1000 words
-4. Use English"""
+4. Use English
+5. Do not include "user" related content, only summarize the Agent's execution process"""
 
     # Step 3: 调用 LLM 生成总结
-    summary_response = await self.llm.generate(
-        messages=[{"role": "user", "content": summary_prompt}]
+    response = await self.llm.generate(
+        messages=[
+            Message(role="system",
+                    content="You are an assistant skilled at summarizing Agent execution processes."),
+            Message(role="user", content=summary_prompt),
+        ]
     )
+    summary_text = response.content
 
-    return summary_response.content
+    return summary_text
+    # 异常时降级：return summary_content（原始拼接文本，不经 LLM）
 ```
 
 ### 总结示例
@@ -468,6 +510,19 @@ skill directory, created an algorithmic philosophy document and an
 interactive HTML artwork based on the templates, then opened the artwork
 in the browser. All operations succeeded.
 ```
+
+> 🚨 **这个例子本身就是"没有截断"的证据。**
+>
+> 上面那 2800 行技能内容 + 600 行 HTML + 223 行 JS，是**原封不动**拼进
+> 总结 prompt 的（源码里没有 `[:200]`）。也就是说：
+>
+> - **总结这一步本来是省 token 的**，却先把全部原始工具输出当成输入——
+>   "压缩"动作本身吃掉了一次完整的历史
+> - 输入 3600+ 行，输出 60 词。压缩比很高，但那 3600 行的输入账是实打实付了
+> - 若输出已是极限，这一步**可能直接超上下文窗口**而失败
+>
+> 这属于 #10 的"**工具上下文预算**"问题：压缩前应先做分级/预截断，
+> 而不是把工具输出无条件全量注入。
 
 ### 总结的注入方式
 
