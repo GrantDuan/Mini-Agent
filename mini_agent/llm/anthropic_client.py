@@ -1,6 +1,7 @@
 """Anthropic LLM client implementation."""
 
 import logging
+import time
 from typing import Any
 
 import anthropic
@@ -79,8 +80,27 @@ class AnthropicClient(LLMClientBase):
         if tools:
             params["tools"] = self._convert_tools(tools)
 
-        # Use Anthropic SDK's async messages.create
-        response = await self.client.messages.create(**params)
+        # Use streaming request: the read timeout now measures the gap between
+        # chunks instead of the total generation time, so long-running reasoning
+        # is not cut off as long as data keeps flowing, while a stalled
+        # connection is detected within one read-timeout window.
+        start = time.monotonic()
+        first_token_after: float | None = None
+
+        async with self.client.messages.stream(**params) as stream:
+            async for event in stream:
+                if first_token_after is None and event.type in (
+                    "content_block_start",
+                    "content_block_delta",
+                ):
+                    first_token_after = time.monotonic() - start
+            response = await stream.get_final_message()
+
+        logger.info(
+            "LLM stream finished: first token after %.1fs, total %.1fs",
+            first_token_after if first_token_after is not None else -1.0,
+            time.monotonic() - start,
+        )
         return response
 
     def _convert_tools(self, tools: list[Any]) -> list[dict[str, Any]]:

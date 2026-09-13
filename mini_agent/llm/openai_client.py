@@ -2,6 +2,8 @@
 
 import json
 import logging
+import time
+from types import SimpleNamespace
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -70,15 +72,96 @@ class OpenAIClient(LLMClientBase):
             "messages": api_messages,
             # Enable reasoning_split to separate thinking content
             "extra_body": {"reasoning_split": True},
+            # Streaming mode: the read timeout measures the gap between chunks
+            # instead of the total generation time, so long-running reasoning
+            # is not cut off as long as data keeps flowing, while a stalled
+            # connection is detected within one read-timeout window.
+            "stream": True,
+            # Ask the server to append a final usage-only chunk
+            "stream_options": {"include_usage": True},
         }
 
         if tools:
             params["tools"] = self._convert_tools(tools)
 
-        # Use OpenAI SDK's chat.completions.create
-        response = await self.client.chat.completions.create(**params)
-        # Return full response to access usage info
-        return response
+        start = time.monotonic()
+        first_token_after: float | None = None
+
+        # Content parts accumulated from chunk deltas
+        content_parts: list[str] = []
+        thinking_parts: list[str] = []
+        # tool_calls accumulated by index: {index: {"id", "name", "arguments"}}
+        tool_calls_acc: dict[int, dict[str, str]] = {}
+        usage: Any = None
+
+        stream = await self.client.chat.completions.create(**params)
+        async for chunk in stream:
+            if getattr(chunk, "usage", None):
+                usage = chunk.usage
+
+            if not getattr(chunk, "choices", None):
+                continue
+            delta = chunk.choices[0].delta
+
+            # First content-bearing chunk marks time-to-first-token
+            if first_token_after is None and (
+                getattr(delta, "content", None)
+                or getattr(delta, "reasoning_content", None)
+                or getattr(delta, "reasoning_details", None)
+                or getattr(delta, "tool_calls", None)
+            ):
+                first_token_after = time.monotonic() - start
+
+            # Text content
+            if delta.content:
+                content_parts.append(delta.content)
+
+            # Reasoning / thinking content (MiniMax-style extension)
+            reasoning_piece = getattr(delta, "reasoning_content", None) or getattr(
+                delta, "reasoning_details", None
+            )
+            if reasoning_piece:
+                if isinstance(reasoning_piece, str):
+                    thinking_parts.append(reasoning_piece)
+                elif isinstance(reasoning_piece, list):
+                    for part in reasoning_piece:
+                        thinking_parts.append(getattr(part, "text", "") or "")
+
+            # Tool call deltas: merge by index
+            for tc in delta.tool_calls or []:
+                acc = tool_calls_acc.setdefault(tc.index, {"id": "", "name": "", "arguments": ""})
+                if tc.id:
+                    acc["id"] += tc.id
+                if tc.function and tc.function.name:
+                    acc["name"] += tc.function.name
+                if tc.function and tc.function.arguments:
+                    acc["arguments"] += tc.function.arguments
+
+        logger.info(
+            "LLM stream finished: first token after %.1fs, total %.1fs",
+            first_token_after if first_token_after is not None else -1.0,
+            time.monotonic() - start,
+        )
+
+        # Assemble a ChatCompletion-shaped object so _parse_response works
+        # unchanged for both streaming and non-streaming code paths.
+        message = SimpleNamespace(
+            content="".join(content_parts),
+            reasoning_details=(
+                [SimpleNamespace(text="".join(thinking_parts))] if thinking_parts else []
+            ),
+            tool_calls=(
+                [
+                    SimpleNamespace(
+                        id=acc["id"],
+                        function=SimpleNamespace(name=acc["name"], arguments=acc["arguments"]),
+                    )
+                    for _, acc in sorted(tool_calls_acc.items())
+                ]
+                or None
+            ),
+        )
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=usage)
 
     def _convert_tools(self, tools: list[Any]) -> list[dict[str, Any]]:
         """Convert tools to OpenAI format.
