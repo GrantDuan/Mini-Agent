@@ -26,6 +26,7 @@ class LLMConfig(BaseModel):
     api_base: str = "https://api.minimax.io"
     model: str = "MiniMax-M2.5"
     provider: str = "anthropic"  # "anthropic" or "openai"
+    timeout: float = 600.0  # Single LLM request timeout (seconds)
     retry: RetryConfig = Field(default_factory=RetryConfig)
 
 
@@ -125,6 +126,7 @@ class Config(BaseModel):
             api_base=data.get("api_base", "https://api.minimax.io"),
             model=data.get("model", "MiniMax-M2.5"),
             provider=data.get("provider", "anthropic"),
+            timeout=float(data.get("timeout", 600.0)),
             retry=retry_config,
         )
 

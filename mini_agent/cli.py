@@ -575,6 +575,7 @@ async def run_agent(workspace_dir: Path, task: str = None):
         api_base=config.llm.api_base,
         model=config.llm.model,
         retry_config=retry_config if config.llm.retry.enabled else None,
+        timeout=config.llm.timeout,
     )
 
     # Set retry callback

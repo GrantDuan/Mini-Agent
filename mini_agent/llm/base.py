@@ -20,6 +20,7 @@ class LLMClientBase(ABC):
         api_base: str,
         model: str,
         retry_config: RetryConfig | None = None,
+        timeout: float = 600.0,
     ):
         """Initialize the LLM client.
 
@@ -28,11 +29,13 @@ class LLMClientBase(ABC):
             api_base: Base URL for the API
             model: Model name to use
             retry_config: Optional retry configuration
+            timeout: Request timeout in seconds (applies to a single LLM API call)
         """
         self.api_key = api_key
         self.api_base = api_base
         self.model = model
         self.retry_config = retry_config or RetryConfig()
+        self.timeout = timeout
 
         # Callback for tracking retry count
         self.retry_callback = None
