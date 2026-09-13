@@ -114,6 +114,26 @@ class LLMClient:
         """Set retry callback."""
         self._client.retry_callback = value
 
+    @property
+    def stream_callback(self):
+        """Get the streaming delta callback (called with each text delta)."""
+        return self._client.stream_callback
+
+    @stream_callback.setter
+    def stream_callback(self, value):
+        """Set the streaming delta callback."""
+        self._client.stream_callback = value
+
+    @property
+    def stream_end_callback(self):
+        """Get the stream-end callback (called when one LLM stream finishes)."""
+        return self._client.stream_end_callback
+
+    @stream_end_callback.setter
+    def stream_end_callback(self, value):
+        """Set the stream-end callback."""
+        self._client.stream_end_callback = value
+
     async def generate(
         self,
         messages: list[Message],

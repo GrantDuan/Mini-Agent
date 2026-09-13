@@ -40,6 +40,19 @@ class LLMClientBase(ABC):
         # Callback for tracking retry count
         self.retry_callback = None
 
+        # Callback invoked with each streamed text delta: stream_callback(text)
+        self.stream_callback = None
+        # Callback invoked when one LLM stream finishes: stream_end_callback()
+        self.stream_end_callback = None
+
+    def _notify_stream_end(self) -> None:
+        """Notify the UI that one LLM stream finished (never raises)."""
+        if self.stream_end_callback:
+            try:
+                self.stream_end_callback()
+            except Exception:
+                pass
+
     @abstractmethod
     async def generate(
         self,

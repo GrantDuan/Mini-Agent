@@ -115,6 +115,8 @@ class OpenAIClient(LLMClientBase):
             # Text content
             if delta.content:
                 content_parts.append(delta.content)
+                if self.stream_callback:
+                    self.stream_callback(delta.content)
 
             # Reasoning / thinking content (MiniMax-style extension)
             reasoning_piece = getattr(delta, "reasoning_content", None) or getattr(
@@ -123,9 +125,14 @@ class OpenAIClient(LLMClientBase):
             if reasoning_piece:
                 if isinstance(reasoning_piece, str):
                     thinking_parts.append(reasoning_piece)
+                    if self.stream_callback:
+                        self.stream_callback(reasoning_piece)
                 elif isinstance(reasoning_piece, list):
                     for part in reasoning_piece:
-                        thinking_parts.append(getattr(part, "text", "") or "")
+                        piece_text = getattr(part, "text", "") or ""
+                        thinking_parts.append(piece_text)
+                        if piece_text and self.stream_callback:
+                            self.stream_callback(piece_text)
 
             # Tool call deltas: merge by index
             for tc in delta.tool_calls or []:
@@ -378,4 +385,5 @@ class OpenAIClient(LLMClientBase):
             )
 
         # Parse and return response
+        self._notify_stream_end()
         return self._parse_response(response)

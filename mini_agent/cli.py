@@ -31,6 +31,7 @@ from mini_agent import LLMClient
 from mini_agent.agent import Agent
 from mini_agent.config import Config
 from mini_agent.schema import LLMProvider
+from mini_agent.stream_display import StreamingDisplay
 from mini_agent.tools.base import Tool
 from mini_agent.tools.bash_tool import BashKillTool, BashOutputTool, BashTool
 from mini_agent.tools.file_tools import EditTool, ReadTool, WriteTool
@@ -559,9 +560,13 @@ async def run_agent(workspace_dir: Path, task: str = None):
         retryable_exceptions=(Exception,),
     )
 
+    # Live streaming strip: shows LLM output in a small in-place area
+    stream_display = StreamingDisplay(max_lines=3)
+
     # Create retry callback function to display retry information in terminal
     def on_retry(exception: Exception, attempt: int):
         """Retry callback function to display retry information"""
+        stream_display.finish()  # clear the streaming strip before printing
         print(f"\n{Colors.BRIGHT_YELLOW}⚠️  LLM call failed (attempt {attempt}): {str(exception)}{Colors.RESET}")
         next_delay = retry_config.calculate_delay(attempt - 1)
         print(f"{Colors.DIM}   Retrying in {next_delay:.1f}s (attempt {attempt + 1})...{Colors.RESET}")
@@ -582,6 +587,11 @@ async def run_agent(workspace_dir: Path, task: str = None):
     if config.llm.retry.enabled:
         llm_client.retry_callback = on_retry
         print(f"{Colors.GREEN}✅ LLM retry mechanism enabled (max {config.llm.retry.max_retries} retries){Colors.RESET}")
+
+    # Hook up live streaming display (updates on every LLM text delta,
+    # cleared automatically when each stream ends)
+    llm_client.stream_callback = stream_display.update
+    llm_client.stream_end_callback = stream_display.finish
 
     # 3. Initialize base tools (independent of workspace)
     tools, skill_loader = await initialize_base_tools(config)
@@ -757,7 +767,7 @@ async def run_agent(workspace_dir: Path, task: str = None):
 
             # Run Agent with Esc cancellation support
             print(
-                f"\n{Colors.BRIGHT_BLUE}Agent{Colors.RESET} {Colors.DIM}›{Colors.RESET} {Colors.DIM}Thinking... (Esc to cancel){Colors.RESET}\n"
+                f"\n{Colors.BRIGHT_BLUE}Agent{Colors.RESET} {Colors.DIM}›{Colors.RESET} {Colors.DIM}(Esc to cancel){Colors.RESET}\n"
             )
             agent.add_user_message(user_input)
 
@@ -779,6 +789,7 @@ async def run_agent(workspace_dir: Path, task: str = None):
                             if msvcrt.kbhit():
                                 char = msvcrt.getch()
                                 if char == b"\x1b":  # Esc
+                                    stream_display.finish()  # clear strip before printing
                                     print(f"\n{Colors.BRIGHT_YELLOW}⏹️  Esc pressed, cancelling...{Colors.RESET}")
                                     esc_cancelled[0] = True
                                     cancel_event.set()
@@ -804,6 +815,7 @@ async def run_agent(workspace_dir: Path, task: str = None):
                             if rlist:
                                 char = sys.stdin.read(1)
                                 if char == "\x1b":  # Esc
+                                    stream_display.finish()  # clear strip before printing
                                     print(f"\n{Colors.BRIGHT_YELLOW}⏹️  Esc pressed, cancelling...{Colors.RESET}")
                                     esc_cancelled[0] = True
                                     cancel_event.set()

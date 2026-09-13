@@ -94,6 +94,14 @@ class AnthropicClient(LLMClientBase):
                     "content_block_delta",
                 ):
                     first_token_after = time.monotonic() - start
+
+                # Forward streamed text/thinking deltas to the UI callback
+                if self.stream_callback and event.type == "content_block_delta":
+                    delta_type = getattr(event.delta, "type", None)
+                    if delta_type == "text_delta":
+                        self.stream_callback(event.delta.text)
+                    elif delta_type == "thinking_delta":
+                        self.stream_callback(getattr(event.delta, "thinking", ""))
             response = await stream.get_final_message()
 
         logger.info(
@@ -313,4 +321,5 @@ class AnthropicClient(LLMClientBase):
             )
 
         # Parse and return response
+        self._notify_stream_end()
         return self._parse_response(response)
