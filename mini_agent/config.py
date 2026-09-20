@@ -36,6 +36,8 @@ class AgentConfig(BaseModel):
     max_steps: int = 50
     workspace_dir: str = "./workspace"
     system_prompt_path: str = "system_prompt.md"
+    # Reserved for the future offline LLM judge of "forgot to use memory" (no-op now)
+    memory_judge: bool = False
 
 
 class MCPConfig(BaseModel):

@@ -95,6 +95,21 @@ uv run python -m mini_agent.cli
 uv run python examples/basic_usage.py
 ```
 
+#### Global Install (optional)
+
+The package already defines a `mini-agent` console script in `pyproject.toml`.
+To make the command available globally (from any directory):
+
+```bash
+uv pip install -e .          # uses the Tsinghua mirror pinned in pyproject.toml
+mini-agent --help            # now works from any directory
+mini-agent -w ./my-ws -t "do a task"
+```
+
+Note: on Windows, make sure the venv's `Scripts` directory is on your `PATH`
+(e.g. `E:\ai-agents\Mini-Agent\.venv\Scripts`). If you prefer not to touch
+PATH, `uv run mini-agent --help` from the repo root works too.
+
 ### 4. Run the Evals
 
 ```bash

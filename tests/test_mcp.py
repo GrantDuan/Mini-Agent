@@ -273,6 +273,7 @@ async def test_url_config_validation():
         }
         json.dump(config, f)
         f.flush()
+        f.close()  # close before use: Windows can't unlink an open file
 
         try:
             tools = await load_mcp_tools_async(f.name)
@@ -297,6 +298,7 @@ async def test_stdio_config_validation():
         }
         json.dump(config, f)
         f.flush()
+        f.close()  # close before use: Windows can't unlink an open file
 
         try:
             tools = await load_mcp_tools_async(f.name)
@@ -320,6 +322,7 @@ async def test_mixed_config_loading():
         }
         json.dump(config, f)
         f.flush()
+        f.close()  # close before use: Windows can't unlink an open file
 
         try:
             # All servers are disabled, should return empty but not error
@@ -386,7 +389,8 @@ async def test_git_mcp_loading(mcp_config):
                 print(f"    {desc}")
 
         # Verify expected tools from minimax_search
-        expected_tools = ["search", "parallel_search", "browse"]
+        # (parallel_search was merged into `search`, which now takes a list of queries)
+        expected_tools = ["search", "browse"]
         loaded_tool_names = [t.name for t in tools]
 
         print("\n🔍 Function verification:")
@@ -539,6 +543,7 @@ async def test_per_server_timeout_override_in_config():
         }
         json.dump(config, f)
         f.flush()
+        f.close()  # close before use: Windows can't unlink an open file
 
         try:
             import time

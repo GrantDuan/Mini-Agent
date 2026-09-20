@@ -320,6 +320,12 @@ Examples:
         action="version",
         version="mini-agent 0.1.0",
     )
+    parser.add_argument(
+        "--memory-judge",
+        action="store_true",
+        default=False,
+        help="Reserved: enable offline LLM judge for memory usage analysis (no-op currently)",
+    )
 
     # Subcommands
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
@@ -495,12 +501,13 @@ async def _quiet_cleanup():
         pass
 
 
-async def run_agent(workspace_dir: Path, task: str = None):
+async def run_agent(workspace_dir: Path, task: str = None, memory_judge: bool = False):
     """Run Agent in interactive or non-interactive mode.
 
     Args:
         workspace_dir: Workspace directory path
         task: If provided, execute this task and exit (non-interactive mode)
+        memory_judge: Reserved flag for the future offline LLM judge (no-op now)
     """
     session_start = datetime.now()
 
@@ -536,6 +543,7 @@ async def run_agent(workspace_dir: Path, task: str = None):
 
     try:
         config = Config.from_yaml(config_path)
+        config.agent.memory_judge = memory_judge
     except FileNotFoundError:
         print(f"{Colors.RED}❌ Error: Configuration file not found: {config_path}{Colors.RESET}")
         return
@@ -622,6 +630,20 @@ async def run_agent(workspace_dir: Path, task: str = None):
         # Remove placeholder if skills not enabled
         system_prompt = system_prompt.replace("{SKILLS_METADATA}", "")
 
+    # 6.5 Inject Memory Usage Policy (only when memory MCP tools are available)
+    from .memory import MEMORY_POLICY_TEXT, find_memory_tools
+
+    memory_tools = find_memory_tools(tool.name for tool in tools)
+    if memory_tools:
+        if "{MEMORY_POLICY}" in system_prompt:
+            system_prompt = system_prompt.replace("{MEMORY_POLICY}", MEMORY_POLICY_TEXT)
+        else:
+            # Fallback: custom system prompt without the placeholder
+            system_prompt = system_prompt + "\n\n" + MEMORY_POLICY_TEXT
+        print(f"{Colors.GREEN}✅ Injected memory policy (memory tools: {', '.join(memory_tools)}){Colors.RESET}")
+    else:
+        system_prompt = system_prompt.replace("{MEMORY_POLICY}", "")
+
     # 7. Create Agent
     agent = Agent(
         llm_client=llm_client,
@@ -629,6 +651,7 @@ async def run_agent(workspace_dir: Path, task: str = None):
         tools=tools,
         max_steps=config.agent.max_steps,
         workspace_dir=str(workspace_dir),
+        memory_judge=config.agent.memory_judge,
     )
 
     # 8. Display welcome information
@@ -890,7 +913,9 @@ def main():
     workspace_dir.mkdir(parents=True, exist_ok=True)
 
     # Run the agent (config always loaded from package directory)
-    asyncio.run(run_agent(workspace_dir, task=args.task))
+    asyncio.run(
+        run_agent(workspace_dir, task=args.task, memory_judge=getattr(args, "memory_judge", False))
+    )
 
 
 if __name__ == "__main__":

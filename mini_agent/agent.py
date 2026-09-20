@@ -10,6 +10,8 @@ import tiktoken
 
 from .llm import LLMClient
 from .logger import AgentLogger
+from .memory import MEMORY_POLICY_HEADING, MEMORY_TOOL_NAMES, find_memory_tools
+from .memory_logger import MemoryLogger
 from .schema import Message
 from .tools.base import Tool, ToolResult
 from .utils import calculate_display_width, display_assistant_text
@@ -53,6 +55,7 @@ class Agent:
         max_steps: int = 50,
         workspace_dir: str = "./workspace",
         token_limit: int = 80000,  # Summary triggered when tokens exceed this value
+        memory_judge: bool = False,  # Reserved for the future offline LLM judge (no-op now)
     ):
         self.llm = llm_client
         self.tools = {tool.name: tool for tool in tools}
@@ -77,6 +80,12 @@ class Agent:
 
         # Initialize logger
         self.logger = AgentLogger()
+
+        # Memory observability: dedicated logger + per-run metadata
+        self.memory_tool_names = find_memory_tools(self.tools.keys())
+        self.memory_policy_injected = MEMORY_POLICY_HEADING in system_prompt
+        self.memory_logger = MemoryLogger()
+        self.memory_judge = memory_judge
 
         # Token usage from last API response (updated after each LLM call)
         self.api_total_tokens: int = 0
@@ -333,10 +342,46 @@ Requirements:
         if cancel_event is not None:
             self.cancel_event = cancel_event
 
-        # Start new run, initialize log file
+        # Start new run, initialize log files
         self.logger.start_new_run()
         print(f"{Colors.DIM}📝 Log file: {self.logger.get_log_file_path()}{Colors.RESET}")
 
+        # Start dedicated memory log for this run
+        self.memory_logger.start_new_run(
+            memory_tools=self.memory_tool_names,
+            policy_injected=self.memory_policy_injected,
+            system_prompt=self.system_prompt,
+            memory_judge=self.memory_judge,
+        )
+
+        try:
+            return await self._run_loop()
+        finally:
+            self.memory_logger.log_summary()
+
+    def _log_memory_turn_signal(self, step: int, tools_called: list[str]):
+        """Record per-step memory visibility signals for the dedicated log.
+
+        Args:
+            step: Zero-based step index.
+            tools_called: Tool names invoked this step (empty if none).
+        """
+        user_excerpt = ""
+        for msg in reversed(self.messages):
+            if msg.role == "user":
+                user_excerpt = msg.content or ""
+                break
+        self.memory_logger.log_turn_signal(
+            turn_index=step,
+            user_excerpt=user_excerpt,
+            memory_tools=self.memory_tool_names,
+            policy_injected=self.memory_policy_injected,
+            memory_tools_called=sorted(set(tools_called) & set(self.memory_tool_names)),
+            tools_called=tools_called,
+        )
+
+    async def _run_loop(self) -> str:
+        """Inner agent loop (called by run(), which handles log lifecycle)."""
         step = 0
         run_start_time = perf_counter()
 
@@ -415,6 +460,7 @@ Requirements:
 
             # Check if task is complete (no tool calls)
             if not response.tool_calls:
+                self._log_memory_turn_signal(step, tools_called=[])
                 step_elapsed = perf_counter() - step_start_time
                 total_elapsed = perf_counter() - run_start_time
                 print(f"\n{Colors.DIM}⏱️  Step {step + 1} completed in {step_elapsed:.2f}s (total: {total_elapsed:.2f}s){Colors.RESET}")
@@ -458,6 +504,10 @@ Requirements:
                         error=f"Unknown tool: {function_name}",
                     )
                 else:
+                    # Memory observability: dedicated log for memory tool calls
+                    is_memory_tool = function_name in self.memory_tool_names
+                    if is_memory_tool:
+                        self.memory_logger.begin_tool_call(step, function_name, arguments)
                     try:
                         tool = self.tools[function_name]
                         result = await tool.execute(**arguments)
@@ -471,6 +521,12 @@ Requirements:
                             success=False,
                             content="",
                             error=f"Tool execution failed: {error_detail}\n\nTraceback:\n{error_trace}",
+                        )
+                    if is_memory_tool:
+                        self.memory_logger.end_tool_call(
+                            success=result.success,
+                            content=result.content if result.success else None,
+                            error=result.error if not result.success else None,
                         )
 
                 # Log tool execution result
@@ -510,6 +566,10 @@ Requirements:
             step_elapsed = perf_counter() - step_start_time
             total_elapsed = perf_counter() - run_start_time
             print(f"\n{Colors.DIM}⏱️  Step {step + 1} completed in {step_elapsed:.2f}s (total: {total_elapsed:.2f}s){Colors.RESET}")
+
+            self._log_memory_turn_signal(
+                step, tools_called=[tc.function.name for tc in response.tool_calls]
+            )
 
             step += 1
 
