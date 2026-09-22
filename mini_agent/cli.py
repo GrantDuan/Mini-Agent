@@ -13,6 +13,7 @@ Examples:
 import argparse
 import asyncio
 import platform
+import re
 import subprocess
 import sys
 import threading
@@ -199,6 +200,7 @@ def print_help():
   {Colors.BRIGHT_GREEN}/stats{Colors.RESET}     - Show session statistics
   {Colors.BRIGHT_GREEN}/log{Colors.RESET}       - Show log directory and recent files
   {Colors.BRIGHT_GREEN}/log <file>{Colors.RESET} - Read a specific log file
+  {Colors.BRIGHT_GREEN}/debate <topic>{Colors.RESET} - Multi-agent bull/bear debate with judge verdict
   {Colors.BRIGHT_GREEN}/exit{Colors.RESET}      - Exit program (also: exit, quit, q)
 
 {Colors.BOLD}{Colors.BRIGHT_YELLOW}Keyboard Shortcuts:{Colors.RESET}
@@ -501,6 +503,167 @@ async def _quiet_cleanup():
         pass
 
 
+async def _run_with_esc_cancel(coro_factory, stream_display: StreamingDisplay):
+    """Run a coroutine factory with Esc-to-cancel support.
+
+    coro_factory receives an asyncio.Event used as the cancellation event.
+    Returns (result, cancelled).
+    """
+    cancel_event = asyncio.Event()
+    esc_listener_stop = threading.Event()
+    esc_cancelled = [False]  # Mutable container for thread access
+
+    def esc_key_listener():
+        """Listen for Esc key in a separate thread."""
+        if platform.system() == "Windows":
+            try:
+                import msvcrt
+
+                while not esc_listener_stop.is_set():
+                    if msvcrt.kbhit():
+                        char = msvcrt.getch()
+                        if char == b"\x1b":  # Esc
+                            stream_display.finish()
+                            print(f"\n{Colors.BRIGHT_YELLOW}⏹️  Esc pressed, cancelling...{Colors.RESET}")
+                            esc_cancelled[0] = True
+                            cancel_event.set()
+                            break
+                    esc_listener_stop.wait(0.05)
+            except Exception:
+                pass
+            return
+
+        # Unix/macOS
+        try:
+            import select
+            import termios
+            import tty
+
+            fd = sys.stdin.fileno()
+            old_settings = termios.tcgetattr(fd)
+
+            try:
+                tty.setcbreak(fd)
+                while not esc_listener_stop.is_set():
+                    rlist, _, _ = select.select([sys.stdin], [], [], 0.05)
+                    if rlist:
+                        char = sys.stdin.read(1)
+                        if char == "\x1b":  # Esc
+                            stream_display.finish()
+                            print(f"\n{Colors.BRIGHT_YELLOW}⏹️  Esc pressed, cancelling...{Colors.RESET}")
+                            esc_cancelled[0] = True
+                            cancel_event.set()
+                            break
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        except Exception:
+            pass
+
+    esc_thread = threading.Thread(target=esc_key_listener, daemon=True)
+    esc_thread.start()
+
+    try:
+        task = asyncio.create_task(coro_factory(cancel_event))
+        while not task.done():
+            if esc_cancelled[0]:
+                cancel_event.set()
+            await asyncio.sleep(0.1)
+        return task.result(), False
+    except asyncio.CancelledError:
+        return None, True
+    finally:
+        esc_listener_stop.set()
+        esc_thread.join(timeout=0.2)
+
+
+def _parse_debate_args(user_input: str):
+    """Parse `/debate <topic> [--rounds N]`. Returns (topic, rounds) or (None, 0)."""
+    parts = user_input.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        return None, 0
+    rest = parts[1].strip()
+    rounds = 2
+    match = re.search(r"(?:^|\s)--rounds[= ](\d+)(?=\s|$)", rest)
+    if match:
+        rounds = max(1, int(match.group(1)))
+        rest = rest[: match.start()] + rest[match.end():]
+    topic = rest.strip()
+    return (topic, rounds) if topic else (None, 0)
+
+
+async def run_debate_command(
+    llm_client,
+    tools: List,
+    workspace_dir: Path,
+    topic: str,
+    rounds: int,
+    stream_display: StreamingDisplay,
+):
+    """Run a bull/bear debate with a judge verdict via the multi-agent layer."""
+    from mini_agent.multi_agent import AgentRegistry, DebateOrchestrator, SharedTranscript
+
+    registry = AgentRegistry()
+    transcript = SharedTranscript()
+
+    def on_turn_start(role: str, round_no: int):
+        icons = {"bull": "🐂", "bear": "🐻", "judge": "⚖️"}
+        labels = {"bull": "Bull", "bear": "Bear", "judge": "Judge"}
+        colors = {
+            "bull": Colors.BRIGHT_GREEN,
+            "bear": Colors.BRIGHT_RED,
+            "judge": Colors.BRIGHT_YELLOW,
+        }
+        stream_display.finish()
+        round_label = f" (R{round_no})" if role != "judge" else ""
+        print(
+            f"\n{Colors.BOLD}{colors[role]}{icons[role]} {labels[role]}{round_label}{Colors.RESET}"
+            f" {Colors.DIM}›{Colors.RESET}\n"
+        )
+
+    orchestrator = DebateOrchestrator(
+        num_rounds=rounds,
+        on_turn_start=on_turn_start,
+        registry=registry,
+        transcript=transcript,
+        llm_client=llm_client,
+        tools=tools,
+        workspace_dir=str(workspace_dir),
+    )
+
+    print(
+        f"\n{Colors.BRIGHT_MAGENTA}⚔️  Debate started{Colors.RESET} "
+        f"{Colors.DIM}(topic: {topic} | rounds: {rounds} | Esc to cancel){Colors.RESET}\n"
+    )
+
+    def coro_factory(cancel_event: asyncio.Event):
+        orchestrator.cancel_event = cancel_event
+        return orchestrator.run(topic)
+
+    verdict, _ = await _run_with_esc_cancel(coro_factory, stream_display)
+
+    # Save the full debate transcript to the workspace
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    transcript_file = workspace_dir / f"debate_{timestamp}.md"
+    try:
+        header = (
+            f"# Debate Transcript\n\n- Topic: {topic}\n- Rounds: {rounds}\n"
+            f"- Time: {timestamp}\n\n"
+        )
+        body = transcript.render() if transcript.messages else "(no turns completed)"
+        transcript_file.write_text(header + body, encoding="utf-8")
+    except Exception as e:
+        print(f"{Colors.RED}❌ Failed to save debate transcript: {e}{Colors.RESET}")
+        transcript_file = None
+
+    if verdict == "Task cancelled by user.":
+        print(f"\n{Colors.BRIGHT_YELLOW}⚠️  Debate cancelled{Colors.RESET}")
+    elif transcript_file:
+        print(
+            f"\n{Colors.GREEN}✅ Debate finished, transcript saved to: "
+            f"{transcript_file}{Colors.RESET}\n"
+        )
+
+
 async def run_agent(workspace_dir: Path, task: str = None, memory_judge: bool = False):
     """Run Agent in interactive or non-interactive mode.
 
@@ -677,7 +840,7 @@ async def run_agent(workspace_dir: Path, task: str = None, memory_judge: bool = 
     # 9. Setup prompt_toolkit session
     # Command completer
     command_completer = WordCompleter(
-        ["/help", "/clear", "/history", "/stats", "/log", "/exit", "/quit", "/q"],
+        ["/help", "/clear", "/history", "/stats", "/log", "/debate", "/exit", "/quit", "/q"],
         ignore_case=True,
         sentence=True,
     )
@@ -775,6 +938,22 @@ async def run_agent(workspace_dir: Path, task: str = None, memory_judge: bool = 
                         # /log <filename> - read specific log file
                         filename = parts[1].strip("\"'")
                         read_log_file(filename)
+                    continue
+
+                elif command == "/debate" or command.startswith("/debate "):
+                    topic, rounds = _parse_debate_args(user_input)
+                    if not topic:
+                        print(
+                            f"{Colors.RED}❌ Usage: /debate <topic> [--rounds N] "
+                            f"(default rounds: 2){Colors.RESET}\n"
+                        )
+                        continue
+                    try:
+                        await run_debate_command(
+                            llm_client, tools, workspace_dir, topic, rounds, stream_display
+                        )
+                    except Exception as e:
+                        print(f"{Colors.RED}❌ Debate failed: {e}{Colors.RESET}\n")
                     continue
 
                 else:
