@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import re
 from dataclasses import dataclass, field
@@ -108,6 +110,15 @@ class SubagentDirectory:
         return "\n".join(lines)
 
 
+def _create_skill_tools_safe(skills_dir: str):
+    """create_skill_tools 内部会 print "✅/⚠️"，GBK 等非 UTF-8 控制台可能
+    无法编码导致整个加载崩溃。其输出是启动噪音（本模块有自己的 warnings
+    与 summary），这里将其隔离到内存缓冲区。"""
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        return create_skill_tools(skills_dir)
+
+
 def _plugin_name(plugin_dir: Path, warnings: list[str]) -> str:
     """插件名：优先 .claude-plugin/plugin.json 的 name，否则目录名。"""
     manifest = plugin_dir / ".claude-plugin" / "plugin.json"
@@ -158,7 +169,7 @@ def discover_plugins(plugins_dir: Path) -> SubagentDirectory:
         # 2) skills/ -> 本插件专属 skill 工具
         skills_dir = plugin_dir / "skills"
         if skills_dir.exists():
-            tools, _loader = create_skill_tools(str(skills_dir))
+            tools, _loader = _create_skill_tools_safe(str(skills_dir))
             for defn in directory.definitions.values():
                 if defn.plugin_name == plugin_name:
                     directory.skill_tools[defn.name] = tools

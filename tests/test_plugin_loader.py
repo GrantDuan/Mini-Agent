@@ -158,3 +158,58 @@ def test_prompt_section_lists_agents(tmp_path):
     assert "agent-a" in section
     assert "Does A things" in section
     assert "dispatch_agent" in section
+
+
+def write_config(tmp_path: Path, tools_block: str = "") -> Path:
+    """写一个最小合法 config.yaml（from_yaml 要求顶层非占位 api_key）。"""
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(
+        f"api_key: test-key-123\n{tools_block}",
+        encoding="utf-8",
+    )
+    return cfg_file
+
+
+def test_config_plugins_fields(tmp_path):
+    from mini_agent.config import Config
+
+    cfg_file = write_config(
+        tmp_path, "tools:\n  enable_plugins: false\n  plugins_dir: ./custom-plugins\n"
+    )
+    config = Config.from_yaml(cfg_file)
+    assert config.tools.enable_plugins is False
+    assert config.tools.plugins_dir == "./custom-plugins"
+
+
+def test_config_plugins_defaults(tmp_path):
+    from mini_agent.config import Config
+
+    config = Config.from_yaml(write_config(tmp_path))
+    assert config.tools.enable_plugins is True
+    assert config.tools.plugins_dir == "./plugins"
+
+
+def test_discover_plugins_survives_gbk_stdout(tmp_path):
+    """GBK 控制台下 create_skill_tools 内部的 ✅ print 不得让插件加载崩溃。"""
+    import io
+    import sys
+
+    plugin_dir = tmp_path / "p"
+    (plugin_dir / "agents").mkdir(parents=True)
+    (plugin_dir / "agents" / "expert.md").write_text(
+        "---\nname: expert\ndescription: An expert\n---\n\nBody.\n", encoding="utf-8"
+    )
+    (plugin_dir / "skills" / "s1").mkdir(parents=True)
+    (plugin_dir / "skills" / "s1" / "SKILL.md").write_text(
+        "---\nname: s1\ndescription: A skill\n---\n\nDo it.\n", encoding="utf-8"
+    )
+
+    fake = io.TextIOWrapper(io.BytesIO(), encoding="gbk", errors="strict")
+    real_stdout = sys.stdout
+    sys.stdout = fake
+    try:
+        directory = discover_plugins(tmp_path)
+    finally:
+        sys.stdout = real_stdout
+    assert "expert" in directory.definitions
+    assert "expert" in directory.skill_tools

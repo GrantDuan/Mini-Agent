@@ -770,6 +770,53 @@ async def run_agent(workspace_dir: Path, task: str = None, memory_judge: bool = 
     # 4. Add workspace-dependent tools
     add_workspace_tools(tools, config, workspace_dir)
 
+    # 4.5 Load plugins (Claude Code format agents/skills from mini_agent/plugins)
+    plugin_directory = None
+    if config.tools.enable_plugins:
+        from mini_agent.multi_agent.dispatch_tool import DispatchAgentTool
+        from mini_agent.multi_agent.plugin_loader import discover_plugins
+
+        plugins_path = Path(config.tools.plugins_dir).expanduser()
+        search_paths = [
+            plugins_path,                              # ./plugins
+            Path("mini_agent") / plugins_path,         # ./mini_agent/plugins
+            Config.get_package_dir() / plugins_path,   # site-packages/mini_agent/plugins
+        ]
+        plugins_dir = next((p.resolve() for p in search_paths if p.exists()), None)
+        if plugins_dir:
+            plugin_directory = discover_plugins(plugins_dir)
+            for warning in plugin_directory.warnings:
+                print(f"{Colors.YELLOW}{warning}{Colors.RESET}")
+            if plugin_directory.definitions:
+                # 排除主 agent 的 get_skill：Agent.tools 按名字建 dict，
+                # 两个 get_skill 会静默互相覆盖；subagent 只用插件版 skill 工具。
+                base_for_subagents = [t for t in tools if t.name != "get_skill"]
+                dispatch_tool = DispatchAgentTool(
+                    directory=plugin_directory,
+                    llm_client=llm_client,
+                    base_tools=base_for_subagents,
+                    workspace_dir=str(workspace_dir),
+                    max_steps=config.agent.max_steps,
+                )
+                tools.append(dispatch_tool)
+                print(
+                    f"{Colors.GREEN}✅ Loaded plugins: {len(plugin_directory.definitions)} "
+                    f"subagents ({', '.join(plugin_directory.names())}){Colors.RESET}"
+                )
+                # frontmatter 里引用的、本机没有的工具（mcp__factset__* 等）警告一次
+                known = {t.name for t in tools}
+                unresolved = sorted(
+                    {t for d in plugin_directory.definitions.values() for t in d.tools}
+                    - known
+                )
+                if unresolved:
+                    print(
+                        f"{Colors.YELLOW}⚠️  插件引用的不可用工具（已忽略）: "
+                        f"{', '.join(unresolved)}{Colors.RESET}"
+                    )
+            else:
+                print(f"{Colors.YELLOW}⚠️  No plugin agents found in {plugins_dir}{Colors.RESET}")
+
     # 5. Load System Prompt (with priority search)
     system_prompt_path = Config.find_config_file(config.agent.system_prompt_path)
     if system_prompt_path and system_prompt_path.exists():
@@ -806,6 +853,10 @@ async def run_agent(workspace_dir: Path, task: str = None, memory_judge: bool = 
         print(f"{Colors.GREEN}✅ Injected memory policy (memory tools: {', '.join(memory_tools)}){Colors.RESET}")
     else:
         system_prompt = system_prompt.replace("{MEMORY_POLICY}", "")
+
+    # 6.6 Inject available subagents into system prompt
+    if plugin_directory and plugin_directory.definitions:
+        system_prompt = system_prompt + "\n\n" + plugin_directory.prompt_section()
 
     # 7. Create Agent
     agent = Agent(

@@ -60,6 +60,10 @@ class ToolsConfig(BaseModel):
     enable_skills: bool = True
     skills_dir: str = "./skills"
 
+    # Plugins (Claude Code format agents/skills)
+    enable_plugins: bool = True
+    plugins_dir: str = "./plugins"
+
     # MCP tools
     enable_mcp: bool = True
     mcp_config_path: str = "mcp.json"
@@ -156,6 +160,8 @@ class Config(BaseModel):
             enable_note=tools_data.get("enable_note", True),
             enable_skills=tools_data.get("enable_skills", True),
             skills_dir=tools_data.get("skills_dir", "./skills"),
+            enable_plugins=tools_data.get("enable_plugins", True),
+            plugins_dir=tools_data.get("plugins_dir", "./plugins"),
             enable_mcp=tools_data.get("enable_mcp", True),
             mcp_config_path=tools_data.get("mcp_config_path", "mcp.json"),
             mcp=mcp_config,
