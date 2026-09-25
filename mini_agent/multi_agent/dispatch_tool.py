@@ -17,6 +17,16 @@ from mini_agent.multi_agent.plugin_loader import SubagentDirectory
 from mini_agent.tools.base import Tool, ToolResult
 
 
+def build_subagent_base_tools(tools: list) -> list:
+    """从主 agent 工具集中构造 subagent 基座工具集。
+
+    排除所有名为 get_skill 的工具：Agent.tools 按名字建 dict，主 agent 的
+    get_skill 若混入基座，会与插件 skill 工具静默互相覆盖。插件的
+    get_skill 由 SubagentDirectory.skill_tools 单独提供，不经过这里。
+    """
+    return [t for t in tools if t.name != "get_skill"]
+
+
 class DispatchAgentTool(Tool):
     """把任务委派给已加载插件的某个 subagent。"""
 

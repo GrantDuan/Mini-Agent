@@ -98,3 +98,40 @@ async def test_dispatch_includes_plugin_skill_tools(tmp_path):
     result = await tool.execute(agent="expert", task="Go")
     assert result.success is True
     assert any(t.name == "get_skill" for t in fake.seen_tools[0])
+
+
+def test_build_subagent_base_tools_excludes_all_get_skill():
+    """Review Focus #3：主 agent 的 get_skill 必须被过滤，否则与插件版在
+    Agent.tools dict 里静默互相覆盖。基座工具不得含任何名为 get_skill 的工具
+    （插件的 get_skill 由 skill_tools 单独提供）。"""
+    from mini_agent.multi_agent.dispatch_tool import build_subagent_base_tools
+    from mini_agent.tools.base import Tool, ToolResult
+
+    class NamedTool(Tool):
+        def __init__(self, tool_name: str):
+            self._name = tool_name
+
+        @property
+        def name(self):
+            return self._name
+
+        @property
+        def description(self):
+            return "stub"
+
+        @property
+        def parameters(self):
+            return {"type": "object", "properties": {}}
+
+        async def execute(self, **kwargs):
+            return ToolResult(success=True, content="")
+
+    main_get_skill = NamedTool("get_skill")   # 主 agent 的 skill 工具
+    bash = NamedTool("bash")
+    read = NamedTool("read")
+    tools = [main_get_skill, bash, read]
+    base = build_subagent_base_tools(tools)
+    assert base == [bash, read]               # 只去掉 get_skill，其余原序保留
+    # 插件 skill 工具随后单独拼接，拼接后也不得与基座重名
+    combined = base + [NamedTool("get_skill")]
+    assert len({t.name for t in combined}) == len(combined)

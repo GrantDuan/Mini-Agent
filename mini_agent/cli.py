@@ -773,7 +773,10 @@ async def run_agent(workspace_dir: Path, task: str = None, memory_judge: bool = 
     # 4.5 Load plugins (Claude Code format agents/skills from mini_agent/plugins)
     plugin_directory = None
     if config.tools.enable_plugins:
-        from mini_agent.multi_agent.dispatch_tool import DispatchAgentTool
+        from mini_agent.multi_agent.dispatch_tool import (
+            DispatchAgentTool,
+            build_subagent_base_tools,
+        )
         from mini_agent.multi_agent.plugin_loader import discover_plugins
 
         plugins_path = Path(config.tools.plugins_dir).expanduser()
@@ -788,9 +791,9 @@ async def run_agent(workspace_dir: Path, task: str = None, memory_judge: bool = 
             for warning in plugin_directory.warnings:
                 print(f"{Colors.YELLOW}{warning}{Colors.RESET}")
             if plugin_directory.definitions:
-                # 排除主 agent 的 get_skill：Agent.tools 按名字建 dict，
-                # 两个 get_skill 会静默互相覆盖；subagent 只用插件版 skill 工具。
-                base_for_subagents = [t for t in tools if t.name != "get_skill"]
+                # 排除主 agent 的 get_skill，避免与插件版在 subagent 工具表
+                # 里静默互相覆盖（Agent.tools 按名字建 dict）。
+                base_for_subagents = build_subagent_base_tools(tools)
                 dispatch_tool = DispatchAgentTool(
                     directory=plugin_directory,
                     llm_client=llm_client,
