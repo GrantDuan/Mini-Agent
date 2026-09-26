@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from mini_agent.multi_agent.plugin_loader import (
     AgentDefinition,
     discover_plugins,
@@ -213,3 +215,46 @@ def test_discover_plugins_survives_gbk_stdout(tmp_path):
         sys.stdout = real_stdout
     assert "expert" in directory.definitions
     assert "expert" in directory.skill_tools
+
+
+def test_parse_agent_md_tools_as_yaml_list(tmp_path):
+    """Review Focus #3：tools: 用 YAML 列表形式书写也照样解析。"""
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    md = agents_dir / "listy.md"
+    md.write_text(
+        "---\nname: listy\ndescription: d\ntools:\n  - read_file\n  - bash\n---\n\nBody.\n",
+        encoding="utf-8",
+    )
+    defn = parse_agent_md(md, plugin_name="p")
+    assert defn is not None
+    assert defn.tools == ["read_file", "bash"]
+
+
+_REPO_PLUGINS = Path(__file__).resolve().parents[1] / "mini_agent" / "plugins"
+
+
+@pytest.mark.skipif(
+    not (_REPO_PLUGINS / "gl-reconciler").exists(),
+    reason="mini_agent/plugins/ 不入库（.gitignore）：本机回归用，仓库无该目录时跳过",
+)
+def test_gl_reconciler_plugin_loads():
+    """Review Focus #5：仓库真实插件目录的回归——4 个角色可加载，frontmatter
+    为 Mini-Agent 工具名，reader 只持 read_file，全部角色拿到本插件 skills。
+    真实文件若被存成 CRLF/BOM 也必须通过（_read_text 归一化）。"""
+    repo_plugins = _REPO_PLUGINS
+    directory = discover_plugins(repo_plugins)
+    assert {"gl-reconciler", "reader", "critic", "resolver"} <= set(directory.names())
+
+    assert directory.definitions["gl-reconciler"].tools == [
+        "read_file", "bash", "dispatch_agent", "mcp__internal-gl__*", "mcp__subledger__*",
+    ]
+    assert directory.definitions["reader"].tools == ["read_file"]
+    assert directory.definitions["critic"].tools == ["read_file", "bash"]
+    assert directory.definitions["resolver"].tools == ["read_file", "write_file"]
+
+    # 全部 4 个角色都属于 gl-reconciler 插件 → 都拿到本插件 skill 工具
+    for name in ("gl-reconciler", "reader", "critic", "resolver"):
+        skill_tool = directory.skill_tools[name][0]
+        assert skill_tool.name == "get_skill"
+        assert skill_tool.skill_loader.get_skill("gl-recon") is not None
