@@ -302,3 +302,113 @@ async def test_resolve_directory_idempotent_for_child_instances(tmp_path):
     )
     assert second.unresolved == {}                # 已缓存，不再解析
     assert directory.resolved_tools["expert"] == []  # 首次结果未被覆盖
+
+
+# ---- Task 3: 串行链 ----
+from mini_agent.schema import FunctionCall, LLMResponse, ToolCall
+
+
+class ScriptedLLMClient(FakeLLMClient):
+    """按脚本逐次返回响应（pop(0)），并沿用 seen_messages / seen_tools 记录。"""
+
+    def __init__(self, responses: list[LLMResponse]) -> None:
+        super().__init__()
+        self.responses = list(responses)
+
+    async def generate(self, messages=None, tools=None, **kwargs):
+        self.seen_messages.append(list(messages or []))
+        self.seen_tools.append(list(tools or []))
+        return self.responses.pop(0)
+
+
+def dispatch_call(agent: str, task: str) -> LLMResponse:
+    """构造一次 dispatch_agent 工具调用响应。"""
+    return LLMResponse(
+        content="",
+        finish_reason="tool_use",
+        tool_calls=[ToolCall(
+            id="call1",
+            type="function",
+            function=FunctionCall(name="dispatch_agent",
+                                  arguments={"agent": agent, "task": task}),
+        )],
+    )
+
+
+async def test_l1_gets_dispatch_when_granted(tmp_path):
+    """tools: 含 dispatch_agent 且子层级 1 < 2 → L1 挂 dispatch 工具。"""
+    directory = SubagentDirectory()
+    directory.definitions["orchestrator"] = make_defn(
+        tmp_path, name="orchestrator", tools=["dispatch_agent", "bash"]
+    )
+    fake = FakeLLMClient()
+    tool = DispatchAgentTool(
+        directory, fake, base_tools=[NamedTool("bash")], workspace_dir=str(tmp_path)
+    )
+    await tool.execute(agent="orchestrator", task="Go")
+    assert any(t.name == "dispatch_agent" for t in fake.seen_tools[0])
+
+
+async def test_default_definition_cannot_spawn(tmp_path):
+    """Review Focus #1：tools: 缺省 ≠ 自动可 spawn（显式授予才有效）。"""
+    directory = SubagentDirectory()
+    directory.definitions["plain"] = make_defn(tmp_path, name="plain", tools=None)
+    fake = FakeLLMClient()
+    tool = DispatchAgentTool(
+        directory, fake, base_tools=[NamedTool("bash")], workspace_dir=str(tmp_path)
+    )
+    await tool.execute(agent="plain", task="Go")
+    assert not any(t.name == "dispatch_agent" for t in fake.seen_tools[0])
+
+
+async def test_serial_chain_three_levels(tmp_path):
+    """集成：主(0) → orchestrator(1) → worker(2)。worker 即使 tools: 授予也无 dispatch；
+    dispatch 阻塞到 worker 跑完，报告返回后 orchestrator 才产出最终结果（串行）。"""
+    directory = SubagentDirectory()
+    directory.definitions["orchestrator"] = make_defn(
+        tmp_path, name="orchestrator", tools=["dispatch_agent"]
+    )
+    directory.definitions["worker"] = make_defn(
+        tmp_path, name="worker", tools=["dispatch_agent", "bash"]  # 故意授予，验证深度上限仍然拦截
+    )
+    fake = ScriptedLLMClient([
+        dispatch_call("worker", "Sub task"),                            # orch 第 1 步
+        LLMResponse(content="WORKER FINAL", finish_reason="end_turn"),  # worker（嵌套发生）
+        LLMResponse(content="ORCH FINAL", finish_reason="end_turn"),    # orch 第 2 步
+    ])
+    tool = DispatchAgentTool(
+        directory, fake, base_tools=[NamedTool("bash")], workspace_dir=str(tmp_path)
+    )
+    result = await tool.execute(agent="orchestrator", task="Top task")
+    assert result.success is True
+    assert result.content == "ORCH FINAL"
+    # 第 1 次调用 = orchestrator：工具表含 dispatch_agent
+    assert any(t.name == "dispatch_agent" for t in fake.seen_tools[0])
+    # 第 2 次调用 = worker：工具表无 dispatch_agent（深度上限），有基座工具
+    assert not any(t.name == "dispatch_agent" for t in fake.seen_tools[1])
+    assert any(t.name == "bash" for t in fake.seen_tools[1])
+    # worker 收到的是纯派发任务（system + user），串行证据：worker 先于 orch 第 2 步
+    assert [m.role for m in fake.seen_messages[1]] == ["system", "user"]
+    assert "Sub task" in fake.seen_messages[1][1].content
+
+
+def test_enum_excludes_owner_name(tmp_path):
+    directory = SubagentDirectory()
+    directory.definitions["expert"] = make_defn(tmp_path, name="expert")
+    directory.definitions["expert-clone"] = make_defn(tmp_path, name="expert-clone")
+    tool = DispatchAgentTool(
+        directory, FakeLLMClient(), base_tools=[],
+        workspace_dir=str(tmp_path), owner_name="expert",
+    )
+    enum = tool.parameters["properties"]["agent"]["enum"]
+    assert "expert" not in enum
+    assert "expert-clone" in enum
+
+
+def test_main_instance_enum_keeps_all(tmp_path):
+    directory = SubagentDirectory()
+    directory.definitions["expert"] = make_defn(tmp_path, name="expert")
+    tool = DispatchAgentTool(
+        directory, FakeLLMClient(), base_tools=[], workspace_dir=str(tmp_path)
+    )
+    assert tool.parameters["properties"]["agent"]["enum"] == ["expert"]

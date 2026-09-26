@@ -9,6 +9,8 @@ Claude Code subagent 语义一致），跑完把最终报告作为工具结果�
 
 spawn 时工具集由 agent 定义 frontmatter 的 tools: 解析决定
 （缺省 = 全部基座 + 本插件 skills；见 resolve_tools 与 _resolve_directory）。
+串行链：dispatch 阻塞到子 agent 跑完、最终报告作为工具结果返回；
+子 agent 再派生受深度上限与显式授予门控（L2 为叶子，不持有 dispatch 实例）。
 """
 
 from __future__ import annotations
@@ -80,12 +82,16 @@ class DispatchAgentTool(Tool):
         base_tools: list,
         workspace_dir: str = "./workspace",
         max_steps: int = 30,
+        depth: int = 0,
+        owner_name: str | None = None,
     ) -> None:
         self.directory = directory
         self.llm_client = llm_client
         self.base_tools = list(base_tools)
         self.workspace_dir = workspace_dir
         self.max_steps = max_steps
+        self.depth = depth              # 持有本实例的 agent 层级：主 agent=0
+        self.owner_name = owner_name    # 持有者的定义名：enum 排除自身，防自递归
         self.unresolved: dict[str, list[str]] = {}
         self._resolve_directory()
 
@@ -127,7 +133,7 @@ class DispatchAgentTool(Tool):
                 "agent": {
                     "type": "string",
                     "description": "Name of the subagent to dispatch to",
-                    "enum": self.directory.names(),
+                    "enum": self._available_names(),
                 },
                 "task": {
                     "type": "string",
@@ -137,6 +143,13 @@ class DispatchAgentTool(Tool):
             },
             "required": ["agent", "task"],
         }
+
+    def _available_names(self) -> list[str]:
+        """可派发的 agent 名：全部定义去掉自身（owner_name 为 None 时不排除）。"""
+        names = self.directory.names()
+        if self.owner_name is None:
+            return names
+        return [n for n in names if n != self.owner_name]
 
     async def execute(self, agent: str, task: str) -> ToolResult:
         defn = self.directory.definitions.get(agent)
@@ -152,6 +165,22 @@ class DispatchAgentTool(Tool):
 
         resolved = self.directory.resolved_tools.get(agent, self.base_tools)
         tools = list(resolved) + list(self.directory.skill_tools.get(agent, []))
+
+        # spawn 门控：显式授予 + 深度上限（子层级 < MAX_SPAWN_DEPTH，L2 为叶子）
+        child_level = self.depth + 1
+        if "dispatch_agent" in defn.tools and child_level < MAX_SPAWN_DEPTH:
+            tools.append(
+                DispatchAgentTool(
+                    directory=self.directory,
+                    llm_client=self.llm_client,
+                    base_tools=self.base_tools,
+                    workspace_dir=self.workspace_dir,
+                    max_steps=self.max_steps,
+                    depth=child_level,
+                    owner_name=agent,
+                )
+            )
+
         sub_agent = Agent(
             llm_client=self.llm_client,
             system_prompt=defn.system_prompt,
