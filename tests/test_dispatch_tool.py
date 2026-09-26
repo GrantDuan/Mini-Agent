@@ -229,3 +229,76 @@ def test_build_subagent_base_tools_excludes_all_get_skill():
     # 插件 skill 工具随后单独拼接，拼接后也不得与基座重名
     combined = base + [NamedTool("get_skill")]
     assert len({t.name for t in combined}) == len(combined)
+
+
+# ---- Task 2: 构造时解析 + execute 拼装 ----
+
+
+async def test_dispatch_default_tools_unchanged(tmp_path):
+    """frontmatter 没写 tools: → 行为与 M1 完全一致：全部基座 + 本插件 get_skill。"""
+    directory = SubagentDirectory()
+    directory.definitions["expert"] = make_defn(tmp_path, name="expert", tools=None)
+    fake = FakeLLMClient()
+    tool = DispatchAgentTool(
+        directory, fake,
+        base_tools=[NamedTool("read_file"), NamedTool("bash")],
+        workspace_dir=str(tmp_path),
+    )
+    await tool.execute(agent="expert", task="Go")
+    # 此用例 skill_tools 为空（无插件 skills），get_skill 不存在
+    names = {t.name for t in fake.seen_tools[0]}
+    assert names == {"read_file", "bash"}
+
+
+async def test_dispatch_honors_tools_field(tmp_path):
+    """写了 tools: → 子 agent 只拿到解析结果 + 本插件 get_skill（bash 被滤掉）。"""
+    directory = SubagentDirectory()
+    directory.definitions["expert"] = make_defn(
+        tmp_path, name="expert", tools=["read_file", "mcp__internal-gl__*"]
+    )
+    directory.skill_tools["expert"] = [NamedTool("get_skill")]
+    fake = FakeLLMClient()
+    tool = DispatchAgentTool(
+        directory, fake,
+        base_tools=[
+            NamedTool("read_file"), NamedTool("bash"),
+            NamedTool("mcp__internal-gl__balances"),
+        ],
+        workspace_dir=str(tmp_path),
+    )
+    await tool.execute(agent="expert", task="Go")
+    names = {t.name for t in fake.seen_tools[0]}
+    assert names == {"read_file", "mcp__internal-gl__balances", "get_skill"}
+
+
+async def test_dispatch_unresolved_collected_and_empty_base(tmp_path):
+    """全部解析失败 → 基座为空（get_skill 仍附带），unresolved 逐名收集供启动警告。"""
+    directory = SubagentDirectory()
+    directory.definitions["expert"] = make_defn(
+        tmp_path, name="expert", tools=["write_file", "nope_tool"]
+    )
+    fake = FakeLLMClient()
+    tool = DispatchAgentTool(
+        directory, fake, base_tools=[NamedTool("bash")], workspace_dir=str(tmp_path)
+    )
+    assert tool.unresolved == {"expert": ["write_file", "nope_tool"]}
+    await tool.execute(agent="expert", task="Go")
+    assert [t.name for t in fake.seen_tools[0]] == []
+
+
+async def test_resolve_directory_idempotent_for_child_instances(tmp_path):
+    """子 dispatch 实例构造时跳过已缓存 agent：unresolved 不重复、缓存不被覆盖。"""
+    directory = SubagentDirectory()
+    directory.definitions["expert"] = make_defn(
+        tmp_path, name="expert", tools=["write_file"]
+    )
+    first = DispatchAgentTool(
+        directory, FakeLLMClient(), base_tools=[], workspace_dir=str(tmp_path)
+    )
+    assert first.unresolved == {"expert": ["write_file"]}
+    second = DispatchAgentTool(
+        directory, FakeLLMClient(), base_tools=[NamedTool("bash")],
+        workspace_dir=str(tmp_path),
+    )
+    assert second.unresolved == {}                # 已缓存，不再解析
+    assert directory.resolved_tools["expert"] == []  # 首次结果未被覆盖

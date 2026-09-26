@@ -85,6 +85,7 @@ class SubagentDirectory:
     definitions: dict[str, AgentDefinition] = field(default_factory=dict)
     skill_tools: dict[str, list] = field(default_factory=dict)  # agent 名 -> 专属 skill 工具
     warnings: list[str] = field(default_factory=list)
+    resolved_tools: dict[str, list] = field(default_factory=dict)  # agent 名 -> 解析后的基座工具
 
     def names(self) -> list[str]:
         return list(self.definitions.keys())

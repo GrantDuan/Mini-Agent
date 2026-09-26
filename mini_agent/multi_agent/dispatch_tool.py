@@ -6,6 +6,9 @@ Claude Code subagent 语义一致），跑完把最终报告作为工具结果�
 
 已知限制（M1）：subagent 运行期间不响应 Esc 取消（cancel_event=None），
 主 agent 在 dispatch 返回后才检查取消。
+
+spawn 时工具集由 agent 定义 frontmatter 的 tools: 解析决定
+（缺省 = 全部基座 + 本插件 skills；见 resolve_tools 与 _resolve_directory）。
 """
 
 from __future__ import annotations
@@ -83,6 +86,25 @@ class DispatchAgentTool(Tool):
         self.base_tools = list(base_tools)
         self.workspace_dir = workspace_dir
         self.max_steps = max_steps
+        self.unresolved: dict[str, list[str]] = {}
+        self._resolve_directory()
+
+    def _resolve_directory(self) -> None:
+        """对目录内每个 agent 解析 tools: 并缓存（幂等：子实例跳过已缓存的）。
+
+        - 缺省（frontmatter 没写 tools:）→ 缓存 base_tools 副本，行为与 M1 一致
+        - 写了 → 缓存 resolve_tools 结果；未解析条目收进 self.unresolved 供启动警告
+        """
+        for name, defn in self.directory.definitions.items():
+            if name in self.directory.resolved_tools:
+                continue
+            if not defn.tools:
+                self.directory.resolved_tools[name] = list(self.base_tools)
+                continue
+            _, resolved, unresolved = resolve_tools(defn, self.base_tools)
+            self.directory.resolved_tools[name] = resolved
+            if unresolved:
+                self.unresolved[name] = unresolved
 
     @property
     def name(self) -> str:
@@ -128,7 +150,8 @@ class DispatchAgentTool(Tool):
         if not task.strip():
             return ToolResult(success=False, content="", error="Task must not be empty")
 
-        tools = self.base_tools + list(self.directory.skill_tools.get(agent, []))
+        resolved = self.directory.resolved_tools.get(agent, self.base_tools)
+        tools = list(resolved) + list(self.directory.skill_tools.get(agent, []))
         sub_agent = Agent(
             llm_client=self.llm_client,
             system_prompt=defn.system_prompt,
