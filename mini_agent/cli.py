@@ -776,6 +776,7 @@ async def run_agent(workspace_dir: Path, task: str = None, memory_judge: bool = 
         from mini_agent.multi_agent.dispatch_tool import (
             DispatchAgentTool,
             build_subagent_base_tools,
+            format_unresolved_warnings,
         )
         from mini_agent.multi_agent.plugin_loader import discover_plugins
 
@@ -806,12 +807,11 @@ async def run_agent(workspace_dir: Path, task: str = None, memory_judge: bool = 
                     f"{Colors.GREEN}✅ Loaded plugins: {len(plugin_directory.definitions)} "
                     f"subagents ({', '.join(plugin_directory.names())}){Colors.RESET}"
                 )
-                # frontmatter 逐名解析的结果：逐 agent 报告未解析工具（取代旧的整块忽略警告）
-                for agent_name, missing in sorted(dispatch_tool.unresolved.items()):
-                    print(
-                        f"{Colors.YELLOW}⚠️  {agent_name}: 未解析工具（已忽略）: "
-                        f"{', '.join(missing)}{Colors.RESET}"
-                    )
+                # frontmatter 逐名解析的结果：精确名未命中与零命中通配分列警告（取代旧整块忽略警告）
+                for line in format_unresolved_warnings(
+                    dispatch_tool.unresolved, dispatch_tool.unresolved_wildcards
+                ):
+                    print(f"{Colors.YELLOW}{line}{Colors.RESET}")
             else:
                 print(f"{Colors.YELLOW}⚠️  No plugin agents found in {plugins_dir}{Colors.RESET}")
 

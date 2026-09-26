@@ -448,3 +448,35 @@ async def test_spawn_gate_uses_construction_time_grant(tmp_path):
     directory.definitions["orchestrator"].tools = ["bash"]  # 构造后收回授予
     await tool.execute(agent="orchestrator", task="Go")
     assert any(t.name == "dispatch_agent" for t in fake.seen_tools[0])  # 缓存仍授予
+
+
+# ---- Final review fix pass: I-2 unresolved 分类 ----
+
+
+def test_unresolved_separates_exact_typos_from_zero_hit_wildcards(tmp_path):
+    """精确名未命中 → unresolved；零命中通配 → unresolved_wildcards（分类警告）。"""
+    directory = SubagentDirectory()
+    directory.definitions["expert"] = make_defn(
+        tmp_path, name="expert", tools=["write_file", "nope_tool", "mcp__x__*"]
+    )
+    tool = DispatchAgentTool(
+        directory, FakeLLMClient(), base_tools=[NamedTool("bash")],
+        workspace_dir=str(tmp_path),
+    )
+    assert tool.unresolved == {"expert": ["write_file", "nope_tool"]}
+    assert tool.unresolved_wildcards == {"expert": ["mcp__x__*"]}
+
+
+def test_format_unresolved_warnings_two_categories():
+    """两类警告逐 agent 排序输出：精确名在前，零命中通配带原因提示。"""
+    from mini_agent.multi_agent.dispatch_tool import format_unresolved_warnings
+
+    lines = format_unresolved_warnings(
+        {"b": ["typo_tool"], "a": ["read_fiel"]},
+        {"c": ["mcp__subledger__*"]},
+    )
+    assert lines == [
+        "⚠️  a: 未解析工具（已忽略）: read_fiel",
+        "⚠️  b: 未解析工具（已忽略）: typo_tool",
+        "⚠️  c: 零命中通配模式（MCP 未安装或拼写有误，已忽略）: mcp__subledger__*",
+    ]

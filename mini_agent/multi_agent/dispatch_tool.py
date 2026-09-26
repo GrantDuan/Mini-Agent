@@ -72,6 +72,22 @@ def resolve_tools(definition: AgentDefinition, pool: list) -> tuple[bool, list, 
     return grants, resolved, unresolved
 
 
+def format_unresolved_warnings(
+    unresolved: dict[str, list[str]], unresolved_wildcards: dict[str, list[str]]
+) -> list[str]:
+    """启动时逐 agent 的未解析工具警告行（精确名与零命中通配分列，按 agent 名排序）。"""
+    lines: list[str] = []
+    for name in sorted(set(unresolved) | set(unresolved_wildcards)):
+        if unresolved.get(name):
+            lines.append(f"⚠️  {name}: 未解析工具（已忽略）: {', '.join(unresolved[name])}")
+        if unresolved_wildcards.get(name):
+            lines.append(
+                f"⚠️  {name}: 零命中通配模式（MCP 未安装或拼写有误，已忽略）: "
+                f"{', '.join(unresolved_wildcards[name])}"
+            )
+    return lines
+
+
 class DispatchAgentTool(Tool):
     """把任务委派给已加载插件的某个 subagent。"""
 
@@ -93,13 +109,15 @@ class DispatchAgentTool(Tool):
         self.depth = depth              # 持有本实例的 agent 层级：主 agent=0
         self.owner_name = owner_name    # 持有者的定义名：enum 排除自身，防自递归
         self.unresolved: dict[str, list[str]] = {}
+        self.unresolved_wildcards: dict[str, list[str]] = {}  # 零命中通配模式（多为未安装的 MCP）
         self._resolve_directory()
 
     def _resolve_directory(self) -> None:
         """对目录内每个 agent 解析 tools: 并缓存（幂等：子实例跳过已缓存的）。
 
         - 缺省（frontmatter 没写 tools:）→ 缓存 base_tools 副本，行为与 M1 一致
-        - 写了 → 缓存 resolve_tools 结果；未解析条目收进 self.unresolved 供启动警告
+        - 写了 → 缓存 resolve_tools 结果；未解析条目按精确名/零命中通配分类收集
+          供启动警告（精确名多为拼写错误，零命中通配多为 MCP 未安装）
         """
         for name, defn in self.directory.definitions.items():
             if name in self.directory.resolved_tools:
@@ -111,8 +129,9 @@ class DispatchAgentTool(Tool):
             grant, resolved, unresolved = resolve_tools(defn, self.base_tools)
             self.directory.resolved_tools[name] = resolved
             self.directory.spawn_grants[name] = grant
-            if unresolved:
-                self.unresolved[name] = unresolved
+            for entry in unresolved:
+                bucket = self.unresolved_wildcards if "*" in entry else self.unresolved
+                bucket.setdefault(name, []).append(entry)
 
     @property
     def name(self) -> str:
