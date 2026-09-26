@@ -56,7 +56,7 @@ M1 之后的现状（`mini_agent/multi_agent/dispatch_tool.py`、`plugin_loader.
 - 子 dispatch 实例的参数 `enum` = `directory.names()` 去掉 `owner_name`（防自递归；深度上限兜底）。主 agent 实例不排除任何名字
 - 串行语义不变：dispatch 阻塞到子 agent 跑完、最终报告作为工具结果返回
 - 解析纯函数 `resolve_tools(definition, pool) -> (grants_dispatch: bool, resolved: list, unresolved: list[str])`：摘出 `dispatch_agent` 条目作为授予标记返回 → 其余条目对池做精确/fnmatch 匹配 → 返回授予与否、命中工具与未命中条目。缓存放 `SubagentDirectory.resolved_tools: dict[str, list]`（agent 名 → 解析后的基座工具列表；不含 get_skill 与 dispatch 实例，spawn 时拼装）
-- cli 接线处（4.5 步）对每个 agent 跑一次解析，汇总 unresolved 警告——**取代**现有 `cli.py:809-819` 的整块"已忽略"警告；`DispatchAgentTool.execute` 改为从缓存取工具集拼装
+- `DispatchAgentTool.__init__`（即 cli 4.5 步接线处，此时工具池已完整）对目录内每个 agent 跑一次解析，汇总 unresolved 警告——**取代**现有 `cli.py:809-819` 的整块"已忽略"警告；子实例构造时跳过已缓存的 agent（幂等）；`DispatchAgentTool.execute` 改为从缓存取工具集拼装
 - `MAX_SPAWN_DEPTH` 为 `dispatch_tool.py` 模块常量，不进 config（YAGNI）
 
 ### 4.3 插件内容
@@ -65,14 +65,14 @@ M1 之后的现状（`mini_agent/multi_agent/dispatch_tool.py`、`plugin_loader.
 
 | 角色 | `tools:` | 意图 |
 |---|---|---|
-| `gl-reconciler`（改写现有 md） | `read_file, bash, dispatch_agent, mcp__internal-gl__*` | orchestrator 无 `write_file`——"orchestrator never writes" 生效；正文增加编排说明（可派 reader/critic/resolver、各角色职责与产出传递顺序） |
+| `gl-reconciler`（改写现有 md） | `read_file, bash, dispatch_agent, mcp__internal-gl__*, mcp__subledger__*` | orchestrator 无 `write_file`——"orchestrator never writes" 生效；正文增加编排说明（可派 reader/critic/resolver、各角色职责与产出传递顺序） |
 | `reader`（新增） | `read_file` | 按 asset class 读数据找 break 候选；无 MCP 无写，专门接触不可信内容 |
 | `critic`（新增） | `read_file, bash` | 独立复核每个 break，只读 |
 | `resolver`（新增） | `read_file, write_file` | 唯一持有写权限，只吃验证过的 break 集，产出 exception report |
 
 新增 md 均需 `name` / `description` / `tools` frontmatter + 简短角色正文；全文在实现计划中给出。三个新角色自动获得本插件 `get_skill`（按 4.1 skills 例外）。
 
-**其余 7 个插件**：frontmatter 机械替换为 Mini-Agent 工具名（每文件一行），消除启动警告噪音，置于实现计划最后一个 task。
+**其余 9 个插件**：frontmatter 机械替换为 Mini-Agent 工具名（每文件一行），消除启动警告噪音，置于实现计划最后一个 task。
 
 **演示数据**：`examples/gl-recon-demo/` 下提供 `gl_extract.csv` + `subledger_extract.csv`（含若干预设 break：timing / FX / mapping / duplicate 各至少一条）与 README（如何跑演示）。
 
@@ -117,6 +117,6 @@ M1 之后的现状（`mini_agent/multi_agent/dispatch_tool.py`、`plugin_loader.
 | `mini_agent/multi_agent/plugin_loader.py` | `SubagentDirectory` 加 `resolved_tools: dict[str, list]` 缓存字段 |
 | `mini_agent/cli.py` | 4.5 步接线：预计算 + 警告块替换 |
 | `mini_agent/plugins/gl-reconciler/agents/*.md` | 改写 gl-reconciler，新增 reader/critic/resolver |
-| `mini_agent/plugins/<其余 7 个>/agents/*.md` | frontmatter 机械替换 |
+| `mini_agent/plugins/<其余 9 个>/agents/*.md` | frontmatter 机械替换 |
 | `examples/gl-recon-demo/` | 演示 CSV + README |
 | `tests/test_dispatch_tool.py`、`tests/test_plugin_loader.py` | 新增用例 |
