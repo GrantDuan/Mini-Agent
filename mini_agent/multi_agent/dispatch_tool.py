@@ -10,10 +10,11 @@ Claude Code subagent 语义一致），跑完把最终报告作为工具结果�
 
 from __future__ import annotations
 
+import fnmatch
 from typing import Any
 
 from mini_agent.agent import Agent
-from mini_agent.multi_agent.plugin_loader import SubagentDirectory
+from mini_agent.multi_agent.plugin_loader import AgentDefinition, SubagentDirectory
 from mini_agent.tools.base import Tool, ToolResult
 
 
@@ -25,6 +26,45 @@ def build_subagent_base_tools(tools: list) -> list:
     get_skill 由 SubagentDirectory.skill_tools 单独提供，不经过这里。
     """
     return [t for t in tools if t.name != "get_skill"]
+
+
+# 被派 agent 最大层数：主(0) → L1(1) → L2(2)，L2 为叶子（不持有 dispatch 实例）。
+MAX_SPAWN_DEPTH = 2
+
+
+def resolve_tools(definition: AgentDefinition, pool: list) -> tuple[bool, list, list[str]]:
+    """把 AgentDefinition.tools 解析成实际工具。
+
+    返回 (grants_dispatch, resolved, unresolved)：
+    - grants_dispatch: tools: 显式列出 dispatch_agent（spawn 授予标记，不进 resolved）
+    - resolved: 命中的池内工具；精确条目按条目序、通配符按池序展开，名字去重
+    - unresolved: 解析不到的条目原样列出（含零命中的通配符）
+    """
+    grants = False
+    resolved: list = []
+    seen: set[str] = set()
+    unresolved: list[str] = []
+    for entry in definition.tools:
+        if entry == "dispatch_agent":
+            grants = True
+            continue
+        if "*" in entry:
+            matches = [t for t in pool if fnmatch.fnmatch(t.name, entry)]
+            if not matches:
+                unresolved.append(entry)
+                continue
+            hits = matches
+        else:
+            hit = next((t for t in pool if t.name == entry), None)
+            if hit is None:
+                unresolved.append(entry)
+                continue
+            hits = [hit]
+        for tool in hits:
+            if tool.name not in seen:
+                seen.add(tool.name)
+                resolved.append(tool)
+    return grants, resolved, unresolved
 
 
 class DispatchAgentTool(Tool):

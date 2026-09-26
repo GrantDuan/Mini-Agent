@@ -10,6 +10,100 @@ from mini_agent.multi_agent.plugin_loader import (
 )
 from mini_agent.schema import LLMResponse
 
+# ---- 新增：模块级 stub，供多个测试复用 ----
+from mini_agent.tools.base import Tool, ToolResult
+
+
+class NamedTool(Tool):
+    """只有名字的工具 stub。"""
+
+    def __init__(self, tool_name: str):
+        self._name = tool_name
+
+    @property
+    def name(self):
+        return self._name
+
+    @property
+    def description(self):
+        return "stub"
+
+    @property
+    def parameters(self):
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, **kwargs):
+        return ToolResult(success=True, content="")
+
+
+def make_defn(tmp_path: Path, name: str = "a", tools: list | None = None) -> AgentDefinition:
+    """构造测试用 AgentDefinition（tools=None 表示 frontmatter 没写 tools:）。"""
+    return AgentDefinition(
+        name=name,
+        description="d",
+        tools=tools if tools is not None else [],
+        system_prompt="s",
+        plugin_name="p",
+        agent_path=tmp_path / "agents" / f"{name}.md",
+    )
+
+
+# ---- Task 1: resolve_tools ----
+from mini_agent.multi_agent.dispatch_tool import MAX_SPAWN_DEPTH, resolve_tools
+
+
+def test_resolve_tools_exact_and_wildcard(tmp_path):
+    pool = [
+        NamedTool("read_file"),
+        NamedTool("write_file"),
+        NamedTool("mcp__internal-gl__balances"),
+        NamedTool("mcp__internal-gl__entries"),
+    ]
+    defn = make_defn(tmp_path, tools=["read_file", "mcp__internal-gl__*"])
+    grants, resolved, unresolved = resolve_tools(defn, pool)
+    assert grants is False
+    assert [t.name for t in resolved] == [
+        "read_file", "mcp__internal-gl__balances", "mcp__internal-gl__entries",
+    ]
+    assert unresolved == []
+
+
+def test_resolve_tools_dispatch_flag_and_unresolved(tmp_path):
+    pool = [NamedTool("bash")]
+    defn = make_defn(tmp_path, tools=["dispatch_agent", "bash", "mcp__subledger__*"])
+    grants, resolved, unresolved = resolve_tools(defn, pool)
+    assert grants is True                      # dispatch_agent 是授予标记，不进 resolved
+    assert [t.name for t in resolved] == ["bash"]
+    assert unresolved == ["mcp__subledger__*"]  # 零命中的通配符原样进 unresolved
+
+
+def test_resolve_tools_dedupes_overlap(tmp_path):
+    pool = [NamedTool("mcp__x__a"), NamedTool("bash")]
+    defn = make_defn(tmp_path, tools=["mcp__x__a", "mcp__x__*", "bash", "bash"])
+    _, resolved, unresolved = resolve_tools(defn, pool)
+    assert [t.name for t in resolved] == ["mcp__x__a", "bash"]  # 重叠条目去重
+    assert unresolved == []
+
+
+def test_resolve_tools_star_matches_everything(tmp_path):
+    pool = [NamedTool("bash"), NamedTool("read_file")]
+    defn = make_defn(tmp_path, tools=["*"])
+    _, resolved, unresolved = resolve_tools(defn, pool)
+    assert [t.name for t in resolved] == ["bash", "read_file"]
+    assert unresolved == []
+
+
+def test_resolve_tools_get_skill_not_in_pool(tmp_path):
+    """skills 例外：get_skill 不在池里，写了只会进 unresolved 并被警告。"""
+    defn = make_defn(tmp_path, tools=["get_skill"])
+    _, resolved, unresolved = resolve_tools(defn, [NamedTool("bash")])
+    assert resolved == []
+    assert unresolved == ["get_skill"]
+
+
+def test_max_spawn_depth_constant():
+    assert MAX_SPAWN_DEPTH == 2
+
 
 class FakeLLMClient:
     """假 LLM：直接返回固定文本，记录每次收到的 messages 和 tools。"""
