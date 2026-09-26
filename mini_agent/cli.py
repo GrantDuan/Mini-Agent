@@ -806,16 +806,11 @@ async def run_agent(workspace_dir: Path, task: str = None, memory_judge: bool = 
                     f"{Colors.GREEN}✅ Loaded plugins: {len(plugin_directory.definitions)} "
                     f"subagents ({', '.join(plugin_directory.names())}){Colors.RESET}"
                 )
-                # frontmatter 里引用的、本机没有的工具（mcp__factset__* 等）警告一次
-                known = {t.name for t in tools}
-                unresolved = sorted(
-                    {t for d in plugin_directory.definitions.values() for t in d.tools}
-                    - known
-                )
-                if unresolved:
+                # frontmatter 逐名解析的结果：逐 agent 报告未解析工具（取代旧的整块忽略警告）
+                for agent_name, missing in sorted(dispatch_tool.unresolved.items()):
                     print(
-                        f"{Colors.YELLOW}⚠️  插件引用的不可用工具（已忽略）: "
-                        f"{', '.join(unresolved)}{Colors.RESET}"
+                        f"{Colors.YELLOW}⚠️  {agent_name}: 未解析工具（已忽略）: "
+                        f"{', '.join(missing)}{Colors.RESET}"
                     )
             else:
                 print(f"{Colors.YELLOW}⚠️  No plugin agents found in {plugins_dir}{Colors.RESET}")
