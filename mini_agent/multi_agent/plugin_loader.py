@@ -86,6 +86,7 @@ class SubagentDirectory:
     skill_tools: dict[str, list] = field(default_factory=dict)  # agent 名 -> 专属 skill 工具
     warnings: list[str] = field(default_factory=list)
     resolved_tools: dict[str, list] = field(default_factory=dict)  # agent 名 -> 解析后的基座工具
+    spawn_grants: dict[str, bool] = field(default_factory=dict)  # agent 名 -> 是否显式授予 dispatch_agent（构造时解析缓存）
 
     def names(self) -> list[str]:
         return list(self.definitions.keys())

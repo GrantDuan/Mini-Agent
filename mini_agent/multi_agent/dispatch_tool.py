@@ -106,9 +106,11 @@ class DispatchAgentTool(Tool):
                 continue
             if not defn.tools:
                 self.directory.resolved_tools[name] = list(self.base_tools)
+                self.directory.spawn_grants[name] = False
                 continue
-            _, resolved, unresolved = resolve_tools(defn, self.base_tools)
+            grant, resolved, unresolved = resolve_tools(defn, self.base_tools)
             self.directory.resolved_tools[name] = resolved
+            self.directory.spawn_grants[name] = grant
             if unresolved:
                 self.unresolved[name] = unresolved
 
@@ -166,9 +168,9 @@ class DispatchAgentTool(Tool):
         resolved = self.directory.resolved_tools.get(agent, self.base_tools)
         tools = list(resolved) + list(self.directory.skill_tools.get(agent, []))
 
-        # spawn 门控：显式授予 + 深度上限（子层级 < MAX_SPAWN_DEPTH，L2 为叶子）
+        # spawn 门控：显式授予（构造时解析缓存，唯一事实源）+ 深度上限（子层级 < MAX_SPAWN_DEPTH，L2 为叶子）
         child_level = self.depth + 1
-        if "dispatch_agent" in defn.tools and child_level < MAX_SPAWN_DEPTH:
+        if self.directory.spawn_grants.get(agent, False) and child_level < MAX_SPAWN_DEPTH:
             tools.append(
                 DispatchAgentTool(
                     directory=self.directory,

@@ -412,3 +412,39 @@ def test_main_instance_enum_keeps_all(tmp_path):
         directory, FakeLLMClient(), base_tools=[], workspace_dir=str(tmp_path)
     )
     assert tool.parameters["properties"]["agent"]["enum"] == ["expert"]
+
+
+# ---- Final review fix pass: I-1 spawn 授予缓存 ----
+
+
+def test_spawn_grants_cached_at_construction(tmp_path):
+    """构造时解析出的 spawn 授予写入 directory.spawn_grants（解析结果是唯一事实源）。"""
+    directory = SubagentDirectory()
+    directory.definitions["granted"] = make_defn(
+        tmp_path, name="granted", tools=["dispatch_agent", "bash"]
+    )
+    directory.definitions["plain"] = make_defn(tmp_path, name="plain", tools=None)
+    directory.definitions["restricted"] = make_defn(
+        tmp_path, name="restricted", tools=["read_file"]
+    )
+    DispatchAgentTool(
+        directory, FakeLLMClient(),
+        base_tools=[NamedTool("bash"), NamedTool("read_file")],
+        workspace_dir=str(tmp_path),
+    )
+    assert directory.spawn_grants == {"granted": True, "plain": False, "restricted": False}
+
+
+async def test_spawn_gate_uses_construction_time_grant(tmp_path):
+    """门控只认构造时缓存：构造后突变 frontmatter 不改变 spawn 行为（I-1）。"""
+    directory = SubagentDirectory()
+    directory.definitions["orchestrator"] = make_defn(
+        tmp_path, name="orchestrator", tools=["dispatch_agent", "bash"]
+    )
+    fake = FakeLLMClient()
+    tool = DispatchAgentTool(
+        directory, fake, base_tools=[NamedTool("bash")], workspace_dir=str(tmp_path)
+    )
+    directory.definitions["orchestrator"].tools = ["bash"]  # 构造后收回授予
+    await tool.execute(agent="orchestrator", task="Go")
+    assert any(t.name == "dispatch_agent" for t in fake.seen_tools[0])  # 缓存仍授予
