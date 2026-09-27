@@ -26,6 +26,7 @@ class LLMConfig(BaseModel):
     api_base: str = "https://api.minimax.io"
     model: str = "MiniMax-M2.5"
     provider: str = "anthropic"  # "anthropic" or "openai"
+    timeout: float = 600.0  # Single LLM request timeout (seconds)
     retry: RetryConfig = Field(default_factory=RetryConfig)
 
 
@@ -35,6 +36,8 @@ class AgentConfig(BaseModel):
     max_steps: int = 50
     workspace_dir: str = "./workspace"
     system_prompt_path: str = "system_prompt.md"
+    # Reserved for the future offline LLM judge of "forgot to use memory" (no-op now)
+    memory_judge: bool = False
 
 
 class MCPConfig(BaseModel):
@@ -56,6 +59,10 @@ class ToolsConfig(BaseModel):
     # Skills
     enable_skills: bool = True
     skills_dir: str = "./skills"
+
+    # Plugins (Claude Code format agents/skills)
+    enable_plugins: bool = True
+    plugins_dir: str = "./plugins"
 
     # MCP tools
     enable_mcp: bool = True
@@ -125,6 +132,7 @@ class Config(BaseModel):
             api_base=data.get("api_base", "https://api.minimax.io"),
             model=data.get("model", "MiniMax-M2.5"),
             provider=data.get("provider", "anthropic"),
+            timeout=float(data.get("timeout", 600.0)),
             retry=retry_config,
         )
 
@@ -152,6 +160,8 @@ class Config(BaseModel):
             enable_note=tools_data.get("enable_note", True),
             enable_skills=tools_data.get("enable_skills", True),
             skills_dir=tools_data.get("skills_dir", "./skills"),
+            enable_plugins=tools_data.get("enable_plugins", True),
+            plugins_dir=tools_data.get("plugins_dir", "./plugins"),
             enable_mcp=tools_data.get("enable_mcp", True),
             mcp_config_path=tools_data.get("mcp_config_path", "mcp.json"),
             mcp=mcp_config,

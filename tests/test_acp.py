@@ -82,8 +82,12 @@ async def test_acp_turn_executes_tool(acp_agent):
 
 
 @pytest.mark.asyncio
-async def test_acp_invalid_session(acp_agent):
+async def test_acp_missing_session_auto_creates(acp_agent):
+    """Prompting an unknown session auto-creates it (client compatibility)."""
     agent, _ = acp_agent
     prompt = SimpleNamespace(sessionId="missing", prompt=[{"text": "?"}])
     response = await agent.prompt(prompt)
-    assert response.stopReason == "refusal"
+    # The session was auto-created and the turn completed normally
+    assert response.stopReason == "end_turn"
+    assert len(agent._sessions) == 1
+    assert "missing" not in agent._sessions

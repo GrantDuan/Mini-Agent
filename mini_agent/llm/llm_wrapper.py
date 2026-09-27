@@ -40,6 +40,7 @@ class LLMClient:
         api_base: str = "https://api.minimaxi.com",
         model: str = "MiniMax-M2.5",
         retry_config: RetryConfig | None = None,
+        timeout: float = 600.0,
     ):
         """Initialize LLM client with specified provider.
 
@@ -51,6 +52,7 @@ class LLMClient:
                      For third-party APIs (e.g., https://api.siliconflow.cn/v1), used as-is.
             model: Model name to use
             retry_config: Optional retry configuration
+            timeout: Request timeout in seconds
         """
         self.provider = provider
         self.api_key = api_key
@@ -87,6 +89,7 @@ class LLMClient:
                 api_base=full_api_base,
                 model=model,
                 retry_config=retry_config,
+                timeout=timeout,
             )
         elif provider == LLMProvider.OPENAI:
             self._client = OpenAIClient(
@@ -94,6 +97,7 @@ class LLMClient:
                 api_base=full_api_base,
                 model=model,
                 retry_config=retry_config,
+                timeout=timeout,
             )
         else:
             raise ValueError(f"Unsupported provider: {provider}")
@@ -109,6 +113,26 @@ class LLMClient:
     def retry_callback(self, value):
         """Set retry callback."""
         self._client.retry_callback = value
+
+    @property
+    def stream_callback(self):
+        """Get the streaming delta callback (called with each text delta)."""
+        return self._client.stream_callback
+
+    @stream_callback.setter
+    def stream_callback(self, value):
+        """Set the streaming delta callback."""
+        self._client.stream_callback = value
+
+    @property
+    def stream_end_callback(self):
+        """Get the stream-end callback (called when one LLM stream finishes)."""
+        return self._client.stream_end_callback
+
+    @stream_end_callback.setter
+    def stream_end_callback(self, value):
+        """Set the stream-end callback."""
+        self._client.stream_end_callback = value
 
     async def generate(
         self,

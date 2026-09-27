@@ -13,6 +13,7 @@ Examples:
 import argparse
 import asyncio
 import platform
+import re
 import subprocess
 import sys
 import threading
@@ -31,11 +32,12 @@ from mini_agent import LLMClient
 from mini_agent.agent import Agent
 from mini_agent.config import Config
 from mini_agent.schema import LLMProvider
+from mini_agent.stream_display import StreamingDisplay
 from mini_agent.tools.base import Tool
 from mini_agent.tools.bash_tool import BashKillTool, BashOutputTool, BashTool
 from mini_agent.tools.file_tools import EditTool, ReadTool, WriteTool
 from mini_agent.tools.mcp_loader import cleanup_mcp_connections, load_mcp_tools_async, set_mcp_timeout_config
-from mini_agent.tools.note_tool import SessionNoteTool
+from mini_agent.tools.note_tool import RecallNoteTool, SessionNoteTool
 from mini_agent.tools.skill_tool import create_skill_tools
 from mini_agent.utils import calculate_display_width
 
@@ -198,6 +200,7 @@ def print_help():
   {Colors.BRIGHT_GREEN}/stats{Colors.RESET}     - Show session statistics
   {Colors.BRIGHT_GREEN}/log{Colors.RESET}       - Show log directory and recent files
   {Colors.BRIGHT_GREEN}/log <file>{Colors.RESET} - Read a specific log file
+  {Colors.BRIGHT_GREEN}/debate <topic>{Colors.RESET} - Multi-agent bull/bear debate with judge verdict
   {Colors.BRIGHT_GREEN}/exit{Colors.RESET}      - Exit program (also: exit, quit, q)
 
 {Colors.BOLD}{Colors.BRIGHT_YELLOW}Keyboard Shortcuts:{Colors.RESET}
@@ -318,6 +321,12 @@ Examples:
         "-v",
         action="version",
         version="mini-agent 0.1.0",
+    )
+    parser.add_argument(
+        "--memory-judge",
+        action="store_true",
+        default=False,
+        help="Reserved: enable offline LLM judge for memory usage analysis (no-op currently)",
     )
 
     # Subcommands
@@ -464,7 +473,18 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path):
     # Session note tool - needs workspace to store memory file
     if config.tools.enable_note:
         tools.append(SessionNoteTool(memory_file=str(workspace_dir / ".agent_memory.json")))
-        print(f"{Colors.GREEN}✅ Loaded session note tool{Colors.RESET}")
+        tools.append(RecallNoteTool(memory_file=str(workspace_dir / ".agent_memory.json")))
+        print(f"{Colors.GREEN}✅ Loaded session note tools (record + recall){Colors.RESET}")
+
+    # Calculator tool - deterministic arithmetic (don't trust LLM math)
+    from mini_agent.tools.calculator_tool import CalculatorTool
+    tools.append(CalculatorTool())
+    print(f"{Colors.GREEN}✅ Loaded calculator tool{Colors.RESET}")
+
+    # Weather tool - no workspace dependency but loaded here for convenience
+    from mini_agent.tools.weather_tool import WeatherTool
+    tools.append(WeatherTool())
+    print(f"{Colors.GREEN}✅ Loaded weather tool{Colors.RESET}")
 
 
 async def _quiet_cleanup():
@@ -483,12 +503,174 @@ async def _quiet_cleanup():
         pass
 
 
-async def run_agent(workspace_dir: Path, task: str = None):
+async def _run_with_esc_cancel(coro_factory, stream_display: StreamingDisplay):
+    """Run a coroutine factory with Esc-to-cancel support.
+
+    coro_factory receives an asyncio.Event used as the cancellation event.
+    Returns (result, cancelled).
+    """
+    cancel_event = asyncio.Event()
+    esc_listener_stop = threading.Event()
+    esc_cancelled = [False]  # Mutable container for thread access
+
+    def esc_key_listener():
+        """Listen for Esc key in a separate thread."""
+        if platform.system() == "Windows":
+            try:
+                import msvcrt
+
+                while not esc_listener_stop.is_set():
+                    if msvcrt.kbhit():
+                        char = msvcrt.getch()
+                        if char == b"\x1b":  # Esc
+                            stream_display.finish()
+                            print(f"\n{Colors.BRIGHT_YELLOW}⏹️  Esc pressed, cancelling...{Colors.RESET}")
+                            esc_cancelled[0] = True
+                            cancel_event.set()
+                            break
+                    esc_listener_stop.wait(0.05)
+            except Exception:
+                pass
+            return
+
+        # Unix/macOS
+        try:
+            import select
+            import termios
+            import tty
+
+            fd = sys.stdin.fileno()
+            old_settings = termios.tcgetattr(fd)
+
+            try:
+                tty.setcbreak(fd)
+                while not esc_listener_stop.is_set():
+                    rlist, _, _ = select.select([sys.stdin], [], [], 0.05)
+                    if rlist:
+                        char = sys.stdin.read(1)
+                        if char == "\x1b":  # Esc
+                            stream_display.finish()
+                            print(f"\n{Colors.BRIGHT_YELLOW}⏹️  Esc pressed, cancelling...{Colors.RESET}")
+                            esc_cancelled[0] = True
+                            cancel_event.set()
+                            break
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        except Exception:
+            pass
+
+    esc_thread = threading.Thread(target=esc_key_listener, daemon=True)
+    esc_thread.start()
+
+    try:
+        task = asyncio.create_task(coro_factory(cancel_event))
+        while not task.done():
+            if esc_cancelled[0]:
+                cancel_event.set()
+            await asyncio.sleep(0.1)
+        return task.result(), False
+    except asyncio.CancelledError:
+        return None, True
+    finally:
+        esc_listener_stop.set()
+        esc_thread.join(timeout=0.2)
+
+
+def _parse_debate_args(user_input: str):
+    """Parse `/debate <topic> [--rounds N]`. Returns (topic, rounds) or (None, 0)."""
+    parts = user_input.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        return None, 0
+    rest = parts[1].strip()
+    rounds = 2
+    match = re.search(r"(?:^|\s)--rounds[= ](\d+)(?=\s|$)", rest)
+    if match:
+        rounds = max(1, int(match.group(1)))
+        rest = rest[: match.start()] + rest[match.end():]
+    topic = rest.strip()
+    return (topic, rounds) if topic else (None, 0)
+
+
+async def run_debate_command(
+    llm_client,
+    tools: List,
+    workspace_dir: Path,
+    topic: str,
+    rounds: int,
+    stream_display: StreamingDisplay,
+):
+    """Run a bull/bear debate with a judge verdict via the multi-agent layer."""
+    from mini_agent.multi_agent import AgentRegistry, DebateOrchestrator, SharedTranscript
+
+    registry = AgentRegistry()
+    transcript = SharedTranscript()
+
+    def on_turn_start(role: str, round_no: int):
+        icons = {"bull": "🐂", "bear": "🐻", "judge": "⚖️"}
+        labels = {"bull": "Bull", "bear": "Bear", "judge": "Judge"}
+        colors = {
+            "bull": Colors.BRIGHT_GREEN,
+            "bear": Colors.BRIGHT_RED,
+            "judge": Colors.BRIGHT_YELLOW,
+        }
+        stream_display.finish()
+        round_label = f" (R{round_no})" if role != "judge" else ""
+        print(
+            f"\n{Colors.BOLD}{colors[role]}{icons[role]} {labels[role]}{round_label}{Colors.RESET}"
+            f" {Colors.DIM}›{Colors.RESET}\n"
+        )
+
+    orchestrator = DebateOrchestrator(
+        num_rounds=rounds,
+        on_turn_start=on_turn_start,
+        registry=registry,
+        transcript=transcript,
+        llm_client=llm_client,
+        tools=tools,
+        workspace_dir=str(workspace_dir),
+    )
+
+    print(
+        f"\n{Colors.BRIGHT_MAGENTA}⚔️  Debate started{Colors.RESET} "
+        f"{Colors.DIM}(topic: {topic} | rounds: {rounds} | Esc to cancel){Colors.RESET}\n"
+    )
+
+    def coro_factory(cancel_event: asyncio.Event):
+        orchestrator.cancel_event = cancel_event
+        return orchestrator.run(topic)
+
+    verdict, _ = await _run_with_esc_cancel(coro_factory, stream_display)
+
+    # Save the full debate transcript to the workspace
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    transcript_file = workspace_dir / f"debate_{timestamp}.md"
+    try:
+        header = (
+            f"# Debate Transcript\n\n- Topic: {topic}\n- Rounds: {rounds}\n"
+            f"- Time: {timestamp}\n\n"
+        )
+        body = transcript.render() if transcript.messages else "(no turns completed)"
+        transcript_file.write_text(header + body, encoding="utf-8")
+    except Exception as e:
+        print(f"{Colors.RED}❌ Failed to save debate transcript: {e}{Colors.RESET}")
+        transcript_file = None
+
+    if verdict == "Task cancelled by user.":
+        print(f"\n{Colors.BRIGHT_YELLOW}⚠️  Debate cancelled{Colors.RESET}")
+    elif transcript_file:
+        print(
+            f"\n{Colors.GREEN}✅ Debate finished, transcript saved to: "
+            f"{transcript_file}{Colors.RESET}\n"
+        )
+
+
+async def run_agent(workspace_dir: Path, task: str = None, memory_judge: bool = False):
     """Run Agent in interactive or non-interactive mode.
 
     Args:
         workspace_dir: Workspace directory path
         task: If provided, execute this task and exit (non-interactive mode)
+        memory_judge: Reserved flag for the future offline LLM judge (no-op now)
     """
     session_start = datetime.now()
 
@@ -524,6 +706,7 @@ async def run_agent(workspace_dir: Path, task: str = None):
 
     try:
         config = Config.from_yaml(config_path)
+        config.agent.memory_judge = memory_judge
     except FileNotFoundError:
         print(f"{Colors.RED}❌ Error: Configuration file not found: {config_path}{Colors.RESET}")
         return
@@ -548,9 +731,13 @@ async def run_agent(workspace_dir: Path, task: str = None):
         retryable_exceptions=(Exception,),
     )
 
+    # Live streaming strip: shows LLM output in a small in-place area
+    stream_display = StreamingDisplay(max_lines=3)
+
     # Create retry callback function to display retry information in terminal
     def on_retry(exception: Exception, attempt: int):
         """Retry callback function to display retry information"""
+        stream_display.finish()  # clear the streaming strip before printing
         print(f"\n{Colors.BRIGHT_YELLOW}⚠️  LLM call failed (attempt {attempt}): {str(exception)}{Colors.RESET}")
         next_delay = retry_config.calculate_delay(attempt - 1)
         print(f"{Colors.DIM}   Retrying in {next_delay:.1f}s (attempt {attempt + 1})...{Colors.RESET}")
@@ -564,6 +751,7 @@ async def run_agent(workspace_dir: Path, task: str = None):
         api_base=config.llm.api_base,
         model=config.llm.model,
         retry_config=retry_config if config.llm.retry.enabled else None,
+        timeout=config.llm.timeout,
     )
 
     # Set retry callback
@@ -571,11 +759,61 @@ async def run_agent(workspace_dir: Path, task: str = None):
         llm_client.retry_callback = on_retry
         print(f"{Colors.GREEN}✅ LLM retry mechanism enabled (max {config.llm.retry.max_retries} retries){Colors.RESET}")
 
+    # Hook up live streaming display (updates on every LLM text delta,
+    # cleared automatically when each stream ends)
+    llm_client.stream_callback = stream_display.update
+    llm_client.stream_end_callback = stream_display.finish
+
     # 3. Initialize base tools (independent of workspace)
     tools, skill_loader = await initialize_base_tools(config)
 
     # 4. Add workspace-dependent tools
     add_workspace_tools(tools, config, workspace_dir)
+
+    # 4.5 Load plugins (Claude Code format agents/skills from mini_agent/plugins)
+    plugin_directory = None
+    if config.tools.enable_plugins:
+        from mini_agent.multi_agent.dispatch_tool import (
+            DispatchAgentTool,
+            build_subagent_base_tools,
+            format_unresolved_warnings,
+        )
+        from mini_agent.multi_agent.plugin_loader import discover_plugins
+
+        plugins_path = Path(config.tools.plugins_dir).expanduser()
+        search_paths = [
+            plugins_path,                              # ./plugins
+            Path("mini_agent") / plugins_path,         # ./mini_agent/plugins
+            Config.get_package_dir() / plugins_path,   # site-packages/mini_agent/plugins
+        ]
+        plugins_dir = next((p.resolve() for p in search_paths if p.exists()), None)
+        if plugins_dir:
+            plugin_directory = discover_plugins(plugins_dir)
+            for warning in plugin_directory.warnings:
+                print(f"{Colors.YELLOW}{warning}{Colors.RESET}")
+            if plugin_directory.definitions:
+                # 排除主 agent 的 get_skill，避免与插件版在 subagent 工具表
+                # 里静默互相覆盖（Agent.tools 按名字建 dict）。
+                base_for_subagents = build_subagent_base_tools(tools)
+                dispatch_tool = DispatchAgentTool(
+                    directory=plugin_directory,
+                    llm_client=llm_client,
+                    base_tools=base_for_subagents,
+                    workspace_dir=str(workspace_dir),
+                    max_steps=config.agent.max_steps,
+                )
+                tools.append(dispatch_tool)
+                print(
+                    f"{Colors.GREEN}✅ Loaded plugins: {len(plugin_directory.definitions)} "
+                    f"subagents ({', '.join(plugin_directory.names())}){Colors.RESET}"
+                )
+                # frontmatter 逐名解析的结果：精确名未命中与零命中通配分列警告（取代旧整块忽略警告）
+                for line in format_unresolved_warnings(
+                    dispatch_tool.unresolved, dispatch_tool.unresolved_wildcards
+                ):
+                    print(f"{Colors.YELLOW}{line}{Colors.RESET}")
+            else:
+                print(f"{Colors.YELLOW}⚠️  No plugin agents found in {plugins_dir}{Colors.RESET}")
 
     # 5. Load System Prompt (with priority search)
     system_prompt_path = Config.find_config_file(config.agent.system_prompt_path)
@@ -600,6 +838,24 @@ async def run_agent(workspace_dir: Path, task: str = None):
         # Remove placeholder if skills not enabled
         system_prompt = system_prompt.replace("{SKILLS_METADATA}", "")
 
+    # 6.5 Inject Memory Usage Policy (only when memory MCP tools are available)
+    from .memory import MEMORY_POLICY_TEXT, find_memory_tools
+
+    memory_tools = find_memory_tools(tool.name for tool in tools)
+    if memory_tools:
+        if "{MEMORY_POLICY}" in system_prompt:
+            system_prompt = system_prompt.replace("{MEMORY_POLICY}", MEMORY_POLICY_TEXT)
+        else:
+            # Fallback: custom system prompt without the placeholder
+            system_prompt = system_prompt + "\n\n" + MEMORY_POLICY_TEXT
+        print(f"{Colors.GREEN}✅ Injected memory policy (memory tools: {', '.join(memory_tools)}){Colors.RESET}")
+    else:
+        system_prompt = system_prompt.replace("{MEMORY_POLICY}", "")
+
+    # 6.6 Inject available subagents into system prompt
+    if plugin_directory and plugin_directory.definitions:
+        system_prompt = system_prompt + "\n\n" + plugin_directory.prompt_section()
+
     # 7. Create Agent
     agent = Agent(
         llm_client=llm_client,
@@ -607,6 +863,7 @@ async def run_agent(workspace_dir: Path, task: str = None):
         tools=tools,
         max_steps=config.agent.max_steps,
         workspace_dir=str(workspace_dir),
+        memory_judge=config.agent.memory_judge,
     )
 
     # 8. Display welcome information
@@ -632,7 +889,7 @@ async def run_agent(workspace_dir: Path, task: str = None):
     # 9. Setup prompt_toolkit session
     # Command completer
     command_completer = WordCompleter(
-        ["/help", "/clear", "/history", "/stats", "/log", "/exit", "/quit", "/q"],
+        ["/help", "/clear", "/history", "/stats", "/log", "/debate", "/exit", "/quit", "/q"],
         ignore_case=True,
         sentence=True,
     )
@@ -732,6 +989,22 @@ async def run_agent(workspace_dir: Path, task: str = None):
                         read_log_file(filename)
                     continue
 
+                elif command == "/debate" or command.startswith("/debate "):
+                    topic, rounds = _parse_debate_args(user_input)
+                    if not topic:
+                        print(
+                            f"{Colors.RED}❌ Usage: /debate <topic> [--rounds N] "
+                            f"(default rounds: 2){Colors.RESET}\n"
+                        )
+                        continue
+                    try:
+                        await run_debate_command(
+                            llm_client, tools, workspace_dir, topic, rounds, stream_display
+                        )
+                    except Exception as e:
+                        print(f"{Colors.RED}❌ Debate failed: {e}{Colors.RESET}\n")
+                    continue
+
                 else:
                     print(f"{Colors.RED}❌ Unknown command: {user_input}{Colors.RESET}")
                     print(f"{Colors.DIM}Type /help to see available commands{Colors.RESET}\n")
@@ -745,7 +1018,7 @@ async def run_agent(workspace_dir: Path, task: str = None):
 
             # Run Agent with Esc cancellation support
             print(
-                f"\n{Colors.BRIGHT_BLUE}Agent{Colors.RESET} {Colors.DIM}›{Colors.RESET} {Colors.DIM}Thinking... (Esc to cancel){Colors.RESET}\n"
+                f"\n{Colors.BRIGHT_BLUE}Agent{Colors.RESET} {Colors.DIM}›{Colors.RESET} {Colors.DIM}(Esc to cancel){Colors.RESET}\n"
             )
             agent.add_user_message(user_input)
 
@@ -767,6 +1040,7 @@ async def run_agent(workspace_dir: Path, task: str = None):
                             if msvcrt.kbhit():
                                 char = msvcrt.getch()
                                 if char == b"\x1b":  # Esc
+                                    stream_display.finish()  # clear strip before printing
                                     print(f"\n{Colors.BRIGHT_YELLOW}⏹️  Esc pressed, cancelling...{Colors.RESET}")
                                     esc_cancelled[0] = True
                                     cancel_event.set()
@@ -792,6 +1066,7 @@ async def run_agent(workspace_dir: Path, task: str = None):
                             if rlist:
                                 char = sys.stdin.read(1)
                                 if char == "\x1b":  # Esc
+                                    stream_display.finish()  # clear strip before printing
                                     print(f"\n{Colors.BRIGHT_YELLOW}⏹️  Esc pressed, cancelling...{Colors.RESET}")
                                     esc_cancelled[0] = True
                                     cancel_event.set()
@@ -866,7 +1141,9 @@ def main():
     workspace_dir.mkdir(parents=True, exist_ok=True)
 
     # Run the agent (config always loaded from package directory)
-    asyncio.run(run_agent(workspace_dir, task=args.task))
+    asyncio.run(
+        run_agent(workspace_dir, task=args.task, memory_judge=getattr(args, "memory_judge", False))
+    )
 
 
 if __name__ == "__main__":

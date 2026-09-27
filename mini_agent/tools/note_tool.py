@@ -75,7 +75,7 @@ class SessionNoteTool(Tool):
             return []
         
         try:
-            return json.loads(self.memory_file.read_text())
+            return json.loads(self.memory_file.read_text(encoding="utf-8"))
         except Exception:
             return []
 
@@ -86,7 +86,9 @@ class SessionNoteTool(Tool):
         """
         # Ensure parent directory exists when actually saving
         self.memory_file.parent.mkdir(parents=True, exist_ok=True)
-        self.memory_file.write_text(json.dumps(notes, indent=2, ensure_ascii=False))
+        self.memory_file.write_text(
+            json.dumps(notes, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
 
     async def execute(self, content: str, category: str = "general") -> ToolResult:
         """Record a session note.
@@ -176,7 +178,7 @@ class RecallNoteTool(Tool):
                     content="No notes recorded yet.",
                 )
 
-            notes = json.loads(self.memory_file.read_text())
+            notes = json.loads(self.memory_file.read_text(encoding="utf-8"))
 
             if not notes:
                 return ToolResult(

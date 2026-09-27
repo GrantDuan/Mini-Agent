@@ -164,10 +164,10 @@ async def demo_tool_schemas():
 
     # Create client
     client = LLMClient(
-        api_key=config["api_key"],
-        provider=LLMProvider.ANTHROPIC,
-        model="MiniMax-M2.5",
-    )
+            api_key=config["api_key"],
+            api_base=config.get("api_base", None),
+            model=config.get("model", "MiniMax-M2.5")
+        )
 
     # Test with a query that should trigger weather tool
     messages = [
@@ -212,11 +212,12 @@ async def demo_multiple_tools():
     calculator_tool = CalculatorTool()
     translate_tool = TranslateTool()
 
+    # Create client
     client = LLMClient(
-        api_key=config["api_key"],
-        provider=LLMProvider.ANTHROPIC,
-        model="MiniMax-M2.5",
-    )
+            api_key=config["api_key"],
+            api_base=config.get("api_base", None),
+            model=config.get("model", "MiniMax-M2.5")
+        )
 
     messages = [Message(role="user", content="Calculate 15 * 23 for me")]
 

@@ -27,7 +27,12 @@ async def test_foreground_command_with_stderr():
     print("\n=== Testing Stdout/Stderr Separation ===")
 
     bash_tool = BashTool()
-    result = await bash_tool.execute(command="echo 'stdout message' && echo 'stderr message' >&2")
+    if bash_tool.is_windows:
+        # Windows PowerShell 5.1 has no `>&2` or `&&`; write to stderr via .NET
+        command = "Write-Output 'stdout message'; [Console]::Error.WriteLine('stderr message')"
+    else:
+        command = "echo 'stdout message'; echo 'stderr message' >&2"
+    result = await bash_tool.execute(command=command)
 
     assert result.success
     assert "stdout message" in result.stdout

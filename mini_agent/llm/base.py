@@ -20,6 +20,7 @@ class LLMClientBase(ABC):
         api_base: str,
         model: str,
         retry_config: RetryConfig | None = None,
+        timeout: float = 600.0,
     ):
         """Initialize the LLM client.
 
@@ -28,14 +29,29 @@ class LLMClientBase(ABC):
             api_base: Base URL for the API
             model: Model name to use
             retry_config: Optional retry configuration
+            timeout: Request timeout in seconds (applies to a single LLM API call)
         """
         self.api_key = api_key
         self.api_base = api_base
         self.model = model
         self.retry_config = retry_config or RetryConfig()
+        self.timeout = timeout
 
         # Callback for tracking retry count
         self.retry_callback = None
+
+        # Callback invoked with each streamed text delta: stream_callback(text)
+        self.stream_callback = None
+        # Callback invoked when one LLM stream finishes: stream_end_callback()
+        self.stream_end_callback = None
+
+    def _notify_stream_end(self) -> None:
+        """Notify the UI that one LLM stream finished (never raises)."""
+        if self.stream_end_callback:
+            try:
+                self.stream_end_callback()
+            except Exception:
+                pass
 
     @abstractmethod
     async def generate(

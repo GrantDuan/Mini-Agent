@@ -271,9 +271,10 @@ class MCPServerConnection:
         if self.exit_stack:
             try:
                 await self.exit_stack.aclose()
-            except Exception:
-                # anyio cancel scope may raise RuntimeError or ExceptionGroup
-                # when stdio_client's task group is closed from a different
+            except BaseException:
+                # anyio cancel scope may raise CancelledError (a BaseException,
+                # not Exception) or ExceptionGroup/RuntimeError when
+                # stdio_client's task group is closed from a different
                 # task context during shutdown.
                 pass
             finally:
