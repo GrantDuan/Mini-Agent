@@ -36,10 +36,24 @@ A full agent evaluation suite, following the "evals" lesson:
 ### 5. New Tool
 - `mini_agent/tools/calculator_tool.py` — a simple calculator tool, added as a "write your first tool" exercise.
 
-### 6. Environment
+### 6. Memory Observability
+- `mini_agent/memory_logger.py` — observability logging for memory tool usage, with memory policy injection wired through `agent.py`, `cli.py`, and `note_tool.py`.
+- `docs/notes/agent_memory_notes.md` / `docs/notes/memory_observability_notes.md` — study notes on the memory structure, access mechanisms, and the observability design.
+- A deep-dive doc on the MCP server-memory knowledge graph and its data model.
+
+### 7. Multi-Agent System (`mini_agent/multi_agent/`)
+- **Debate mode** — an orchestrator with bull / bear / judge roles (`orchestrator.py`, `modes/debate.py`, `protocol.py`, `registry.py`), integrated into the CLI.
+- **Plugin subagents & the `dispatch_agent` tool** — plugins under `mini_agent/plugins/` are discovered automatically; their Claude Code-format agent definition files (frontmatter) are parsed into subagents, each with its own skill-based tool set. `plugin_loader.py` and the `dispatch_agent` tool are wired into CLI startup.
+- **Spawn gating** — subagent tools are resolved from agent-file frontmatter at dispatch construction (`resolve_tools` + `MAX_SPAWN_DEPTH`); serial spawn chains are depth-limited with a self-excluding dispatch enum; unresolved tools are warned about per agent instead of blanket-ignored. Covered by `tests/test_dispatch_tool.py`, `tests/test_plugin_loader.py`, and a role-matrix load regression.
+- **Ten demo plugins** under `mini_agent/plugins/` (earnings-reviewer, gl-reconciler, kyc-screener, market-researcher, valuation-reviewer, …), with local demo data for the GL-recon pipeline in `examples/gl-recon-demo/`.
+
+### 8. Design Docs
+- `docs/superpowers/` — design spec and implementation plan for the serial pipeline + spawn tool restriction (`specs/`, `plans/`).
+
+### 9. Environment
 - Project-level PyPI mirror (Tsinghua) pinned for reproducible installs in my network environment, with `uv.lock` re-locked.
 
-### 7. Documentation
+### 10. Documentation
 - `docs/lessons/` — lesson notes from AI Product from Scratch (some annotated with my own study summaries), plus a skills-mechanism deep-dive doc and learning-plan notes.
 
 ## What the Base Project Provides (upstream features)

@@ -36,10 +36,24 @@
 ### 5. 新增工具
 - `mini_agent/tools/calculator_tool.py` — 一个简单的计算器工具，作为"编写第一个工具"的练习。
 
-### 6. 环境
+### 6. 记忆可观测性
+- `mini_agent/memory_logger.py` — 记忆工具使用的可观测性日志，并把记忆策略注入贯穿到 `agent.py`、`cli.py` 和 `note_tool.py`。
+- `docs/notes/agent_memory_notes.md` / `docs/notes/memory_observability_notes.md` — 关于记忆结构与访问机制、可观测性设计的学习笔记。
+- 另有一篇 MCP server-memory 知识图谱及其数据模型的详解文档。
+
+### 7. 多 Agent 系统（`mini_agent/multi_agent/`）
+- **辩论模式** — 编排器 + 多头/空头/裁判三种角色（`orchestrator.py`、`modes/debate.py`、`protocol.py`、`registry.py`），已接入 CLI。
+- **插件子 Agent 与 `dispatch_agent` 工具** — 自动发现 `mini_agent/plugins/` 下的插件；解析其 Claude Code 格式的 Agent 定义文件（frontmatter）生成子 Agent，每个子 Agent 拥有基于技能的独立工具集。`plugin_loader.py` 和 `dispatch_agent` 已接入 CLI 启动流程。
+- **Spawn 门控** — 子 Agent 工具集在构造 dispatch 时从定义文件 frontmatter 解析（`resolve_tools` + `MAX_SPAWN_DEPTH`）；串行 spawn 链有深度限制，dispatch 枚举自排除（子 Agent 不能再派发自己）；未解析的工具按 Agent 逐一告警，而不是整体忽略。覆盖测试：`tests/test_dispatch_tool.py`、`tests/test_plugin_loader.py` 及角色矩阵加载回归测试。
+- **十个示例插件**（`mini_agent/plugins/` 下的 earnings-reviewer、gl-reconciler、kyc-screener、market-researcher、valuation-reviewer 等），并配有 GL 对账流水线的本地演示数据（`examples/gl-recon-demo/`）。
+
+### 8. 设计文档
+- `docs/superpowers/` — 串行流水线 + spawn 工具限制的设计规格与实施计划（`specs/`、`plans/`）。
+
+### 9. 环境
 - 项目级固定 PyPI 清华镜像源（适配我的网络环境），并重新 lock 了 `uv.lock`。
 
-### 7. 文档
+### 10. 文档
 - `docs/lessons/` — 来自 AI Product from Scratch 的课程笔记（部分加了我自己的学习总结），另有 Skills 机制详解文档和学习计划笔记。
 
 ## 基础项目提供的能力（上游功能）
